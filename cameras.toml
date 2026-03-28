@@ -1,0 +1,23 @@
+[settings]
+grab_interval_secs = 2
+fastvlm_url = "http://127.0.0.1:8091"
+fortress_url = "http://127.0.0.1:7700"
+house_security_url = "http://127.0.0.1:8081"
+
+[[cameras]]
+id = "front-door"
+name = "Front Door"
+url = "rtsp://admin:password@192.168.2.100:554/stream1"
+enabled = true
+
+[[cameras]]
+id = "backyard"
+name = "Backyard"
+url = "rtsp://admin:password@192.168.2.101:554/stream1"
+enabled = true
+
+[[cameras]]
+id = "garage"
+name = "Garage"
+url = "http://192.168.2.102/snapshot.jpg"
+enabled = false
