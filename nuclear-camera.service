@@ -5,7 +5,7 @@ After=network.target fastvlm.service
 [Service]
 User=crew
 WorkingDirectory=/home/crew/git/nuclear-camera
-ExecStart=/home/crew/.venv/bin/uvicorn main:app --host 0.0.0.0 --port 8092
+ExecStart=/home/crew/.venv/nuclear/bin/uvicorn main:app --host 0.0.0.0 --port 8092
 Restart=on-failure
 RestartSec=10s
 Environment=CAMERA_CONFIG=/home/crew/git/nuclear-camera/cameras.toml
