@@ -57,6 +57,7 @@ struct AppState {
     grader: Arc<Mutex<AlarmGrader>>,
     consul: ConsulClient,
     fortress_url: String,
+    fortress_api_token: String,
     fortress_enabled: bool,
     memory: Arc<Mutex<SecurityMemory>>,
     penny_url: Option<String>,
@@ -95,6 +96,7 @@ async fn main() -> Result<()> {
     let consul = ConsulClient::new(consul_url, CONSUL_TIMEOUT_MS);
 
     let fortress_url = cfg.fortress_url();
+    let fortress_api_token = std::env::var("FORTRESS_API_TOKEN").unwrap_or_default();
     let fortress_enabled = cfg.fortress.mesh_enabled;
     let penny_url = std::env::var("PENNY_BRAIN_URL").ok();
 
@@ -115,6 +117,7 @@ async fn main() -> Result<()> {
         grader: Arc::new(Mutex::new(grader)),
         consul,
         fortress_url,
+        fortress_api_token,
         fortress_enabled,
         memory: memory.clone(),
         penny_url,
@@ -286,9 +289,10 @@ async fn process_event(
         let triad = AffectTriad::from_alarm_event(&alarm);
         let decision = alarm.level.to_string();
         let fortress_url = state.fortress_url.clone();
+        let api_token = state.fortress_api_token.clone();
         let alarm_clone = alarm.clone();
         tokio::spawn(async move {
-            publish_to_mesh(&alarm_clone, &triad, &decision, &fortress_url).await;
+            publish_to_mesh(&alarm_clone, &triad, &decision, &fortress_url, &api_token).await;
         });
     }
 
@@ -427,7 +431,7 @@ async fn handle_watch_socket(mut socket: WebSocket, mut rx: broadcast::Receiver<
     }
 }
 
-async fn publish_to_mesh(alarm: &AlarmEvent, triad: &AffectTriad, decision: &str, fortress_url: &str) {
+async fn publish_to_mesh(alarm: &AlarmEvent, triad: &AffectTriad, decision: &str, fortress_url: &str, api_token: &str) {
     let client = reqwest::Client::new();
     let payload = serde_json::json!({
         "alarm": alarm,
@@ -438,6 +442,7 @@ async fn publish_to_mesh(alarm: &AlarmEvent, triad: &AffectTriad, decision: &str
     });
     let result = client
         .post(format!("{}/v1/mesh/security", fortress_url))
+        .bearer_auth(api_token)
         .json(&payload)
         .timeout(std::time::Duration::from_millis(500))
         .send()

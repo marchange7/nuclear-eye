@@ -36,11 +36,11 @@ python3 -m py_compile main.py
 echo -e "${green}ok${reset}"
 
 echo -n "[4/4] runtime smoke (/summary)... "
-if curl -fsS --max-time 5 "http://127.0.0.1:8080/summary" >/dev/null 2>&1; then
+if curl -fsS --max-time 5 "http://127.0.0.1:8780/summary" >/dev/null 2>&1; then
     echo -e "${green}online${reset}"
     ./scripts/smoke_topology.sh
 else
-    echo -e "${yellow}skipped${reset} (alarm_grader not running on :8080)"
+    echo -e "${yellow}skipped${reset} (alarm_grader not running on :8780)"
 fi
 
 echo ""

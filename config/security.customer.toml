@@ -1,8 +1,8 @@
 [app]
-bind_alarm_grader = "0.0.0.0:8080"
+bind_alarm_grader = "0.0.0.0:8780"
 bind_safetyagent = "0.0.0.0:8081"
 bind_face_db = "0.0.0.0:8087"
-alarm_grader_url = "http://127.0.0.1:8080"
+alarm_grader_url = "http://127.0.0.1:8780"
 face_db_path = "data/face_db.sqlite"
 scene_mode = "security-only"
 model_path = "models/yolov8n.onnx"
@@ -24,7 +24,7 @@ auto_create = true
 [vision]
 tick_ms = 2500
 default_camera_id = "front-door"
-target_url = "http://127.0.0.1:8080/ingest"
+target_url = "http://127.0.0.1:8780/ingest"
 
 [fortress]
 url = "http://127.0.0.1:7700"

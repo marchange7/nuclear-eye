@@ -9,7 +9,7 @@ Type=oneshot
 RemainAfterExit=no
 User=crew
 Group=crew
-WorkingDirectory=/home/crew/git/nuclear-eye
+WorkingDirectory=/data/git/nuclear-eye
 EnvironmentFile=-/home/crew/.config/nuclear-eye/env
 Environment=RUST_LOG=info
 # Required env:
@@ -18,7 +18,7 @@ Environment=RUST_LOG=info
 #   IDENTITY_BASE_URL=http://127.0.0.1:7720
 # CLI usage (via systemd-run or direct):
 #   house-sentinel --action motion-alert --kind alarm_escalation --context "zone:front"
-ExecStart=/home/crew/git/nuclear-eye/target/release/house-sentinel \
+ExecStart=/data/git/nuclear-eye/target/release/house-sentinel \
     --action health-check \
     --kind observe_only
 StandardOutput=journal

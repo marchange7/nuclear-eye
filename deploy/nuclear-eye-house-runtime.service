@@ -9,14 +9,14 @@ Type=oneshot
 RemainAfterExit=no
 User=crew
 Group=crew
-WorkingDirectory=/home/crew/git/nuclear-eye
+WorkingDirectory=/data/git/nuclear-eye
 EnvironmentFile=-/home/crew/.config/nuclear-eye/env
 Environment=RUST_LOG=info
 # Required: JWT issued by identity service for house-runtime node
 # HOUSE_JWT_TOKEN=<token>
 # FORTRESS_BASE_URL=http://127.0.0.1:7710
 # IDENTITY_BASE_URL=http://127.0.0.1:7720
-ExecStart=/home/crew/git/nuclear-eye/target/release/house-runtime
+ExecStart=/data/git/nuclear-eye/target/release/house-runtime
 # Run health-check on demand: systemctl start nuclear-eye-house-runtime
 StandardOutput=journal
 StandardError=journal

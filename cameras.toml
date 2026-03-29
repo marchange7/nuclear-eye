@@ -2,7 +2,7 @@
 grab_interval_secs = 2
 fastvlm_url = "http://127.0.0.1:8091"
 fortress_url = "http://127.0.0.1:7700"
-house_security_url = "http://127.0.0.1:8080"
+house_security_url = "http://127.0.0.1:8780"
 
 [[cameras]]
 id = "front-door"

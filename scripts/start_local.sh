@@ -18,7 +18,7 @@ BOLD='\033[1m' GREEN='\033[32m' RED='\033[31m' RESET='\033[0m'
 check_port_free() {
     local port="$1"
     local owner
-    owner="$(lsof -nP -iTCP:"${port}" -sTCP:LISTEN 2>/dev/null | awk 'NR==2 {print $1 " (PID " $2 ")"}')"
+    owner="$(lsof -nP -iTCP:"${port}" -sTCP:LISTEN 2>/dev/null | awk 'NR==2 {print $1 " (PID " $2 ")"}' || true)"
     if [ -n "$owner" ]; then
         echo -e "  ${RED}✗${RESET} port ${port} already in use by ${owner}"
         echo "  Stop the conflicting process or run with different binds in config."
@@ -72,7 +72,7 @@ echo "Logs:   ${LOG_DIR}/"
 echo "Profile: ${BUILD_PROFILE}"
 echo ""
 
-check_port_free 8080
+check_port_free 8780
 check_port_free 8081
 check_port_free 8085
 check_port_free 8086
@@ -82,8 +82,8 @@ check_port_free 8087
 start_svc "face_db" "face_db" "8087"
 sleep 1
 
-# 2. Alarm Grader (:8080)
-start_svc "alarm_grader" "alarm_grader_agent" "8080"
+# 2. Alarm Grader (:8780)
+start_svc "alarm_grader" "alarm_grader_agent" "8780"
 sleep 1
 
 # 3. SafetyAgent (:8081) — depends on alarm_grader
@@ -105,7 +105,7 @@ sleep 1
 echo ""
 echo -e "${BOLD}Waiting for services to become healthy...${RESET}"
 wait_for "http://127.0.0.1:8087/faces" "face_db"
-wait_for "http://127.0.0.1:8080/summary" "alarm_grader"
+wait_for "http://127.0.0.1:8780/summary" "alarm_grader"
 wait_for "http://127.0.0.1:8081/health" "safetyagent"
 wait_for "http://127.0.0.1:8085/health" "decision_agent"
 wait_for "http://127.0.0.1:8086/health" "safety_aurelie"

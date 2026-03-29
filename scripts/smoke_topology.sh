@@ -3,7 +3,7 @@
 # camera payload -> /sensor/camera -> /ingest -> /summary (+ optional /ws probe)
 set -euo pipefail
 
-ALARM_GRADER="${ALARM_GRADER_URL:-http://127.0.0.1:8080}"
+ALARM_GRADER="${ALARM_GRADER_URL:-http://127.0.0.1:8780}"
 TIMEOUT="${TIMEOUT:-5}"
 
 bold='\033[1m'

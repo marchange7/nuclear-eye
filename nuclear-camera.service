@@ -4,11 +4,11 @@ After=network.target fastvlm.service
 
 [Service]
 User=crew
-WorkingDirectory=/home/crew/git/nuclear-camera
+WorkingDirectory=/data/git/nuclear-eye
 ExecStart=/home/crew/.venv/nuclear/bin/uvicorn main:app --host 0.0.0.0 --port 8092
 Restart=on-failure
 RestartSec=10s
-Environment=CAMERA_CONFIG=/home/crew/git/nuclear-camera/cameras.toml
+Environment=CAMERA_CONFIG=/data/git/nuclear-eye/cameras.toml
 
 [Install]
 WantedBy=multi-user.target

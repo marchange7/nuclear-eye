@@ -449,7 +449,7 @@ async def lifespan(app: FastAPI):
     settings = config.get("settings", {})
     cameras = config.get("cameras", [])
 
-    house_security_url = settings.get("house_security_url", "http://127.0.0.1:8080")
+    house_security_url = settings.get("house_security_url", "http://127.0.0.1:8780")
 
     for cam in cameras:
         if cam.get("enabled", False):

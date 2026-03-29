@@ -10,7 +10,7 @@ services:
       RUST_LOG: info
       HOUSE_SECURITY_CONFIG: /workspace/config/security.docker.toml
     ports:
-      - "8080:8080"
+      - "8780:8780"
     mem_limit: 256m
     cpus: 0.75
     volumes:

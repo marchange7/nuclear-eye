@@ -8,13 +8,13 @@ Wants=nuclear-eye-alarm-grader.service
 Type=simple
 User=crew
 Group=crew
-WorkingDirectory=/home/crew/git/nuclear-eye
+WorkingDirectory=/data/git/nuclear-eye
 EnvironmentFile=-/home/crew/.config/nuclear-eye/env
 Environment=RUST_LOG=info
-Environment=HOUSE_SECURITY_CONFIG=/home/crew/git/nuclear-eye/config/security.toml
+Environment=HOUSE_SECURITY_CONFIG=/data/git/nuclear-eye/config/security.toml
 # Override the AurelieBridgeConfig bind to avoid conflict with actuator (8086)
-Environment=AURELIE_BIND=0.0.0.0:8082
-ExecStart=/home/crew/git/nuclear-eye/target/release/safety_aurelie_agent
+Environment=SAFETY_AURELIE_BIND=0.0.0.0:8082
+ExecStart=/data/git/nuclear-eye/target/release/safety_aurelie_agent
 Restart=on-failure
 RestartSec=5s
 StartLimitIntervalSec=60

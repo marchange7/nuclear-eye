@@ -5,7 +5,7 @@
 ```mermaid
 graph TD
     CAM[🎥 Camera / RTSP] -->|frames| VA[VisionAgent]
-    VA -->|VisionEvent JSON| AG[AlarmGraderAgent :8080]
+    VA -->|VisionEvent JSON| AG[AlarmGraderAgent :8780]
     CAM -->|caption payload| AG
     AG -->|AlarmEvent| SA[SafetyAgent :8081]
     SA -->|if level ≥ min| TG[Telegram Bot]
@@ -31,7 +31,7 @@ graph TD
 |---------------------|---------------------------|-------------|----------------------------------------|
 | VisionAgent         | `vision_agent`            | —           | `vision.target_url` (outbound)         |
 | SafetyAgent         | `safetyagent`             | 8081        | `app.bind_safetyagent`                 |
-| AlarmGraderAgent    | `alarm_grader_agent`      | 8080        | `app.bind_alarm_grader`                |
+| AlarmGraderAgent    | `alarm_grader_agent`      | 8780        | `app.bind_alarm_grader`                |
 | FaceDB              | `face_db`                 | 8087        | `app.bind_face_db`                     |
 | DecisionAgent       | `decision_agent`          | 8085        | `decision.bind` / `DECISION_AGENT_BIND`|
 | SafetyAurélieAgent  | `safety_aurelie_agent`    | 8086        | `aurelie_bridge.bind` / `SAFETY_AURELIE_BIND` |

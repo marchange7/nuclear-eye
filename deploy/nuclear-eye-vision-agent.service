@@ -8,15 +8,15 @@ Wants=nuclear-eye-alarm-grader.service
 Type=simple
 User=crew
 Group=crew
-WorkingDirectory=/home/crew/git/nuclear-eye
+WorkingDirectory=/data/git/nuclear-eye
 EnvironmentFile=-/home/crew/.config/nuclear-eye/env
 Environment=RUST_LOG=info
-Environment=HOUSE_SECURITY_CONFIG=/home/crew/git/nuclear-eye/config/security.toml
+Environment=HOUSE_SECURITY_CONFIG=/data/git/nuclear-eye/config/security.toml
 # Set SNAPSHOT_URL to enable real camera mode (e.g. http://m4:8085/snapshot)
 # Set FASTVLM_URL to enable VLM captioning  (e.g. http://127.0.0.1:8091)
 # Leave both unset to run synthetic test events
 Environment=FASTVLM_URL=http://127.0.0.1:8091
-ExecStart=/home/crew/git/nuclear-eye/target/release/vision_agent
+ExecStart=/data/git/nuclear-eye/target/release/vision_agent
 Restart=on-failure
 RestartSec=5s
 StartLimitIntervalSec=60

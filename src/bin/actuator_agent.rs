@@ -27,7 +27,7 @@ use rumqttc::{AsyncClient, MqttOptions, QoS};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::signal;
+use tokio::{signal, time::timeout};
 use tracing::{info, warn};
 
 // ── MQTT payload helpers ────────────────────────────────────────────────
@@ -103,11 +103,14 @@ async fn actuate(
     let buzzer_topic = format!("{}/buzzer", state.prefix);
     let arm_topic = format!("{}/arm", state.prefix);
 
-    let r1 = state.mqtt.publish(&light_topic, QoS::AtLeastOnce, false, light).await;
-    let r2 = state.mqtt.publish(&buzzer_topic, QoS::AtLeastOnce, false, buzzer).await;
-    let r3 = state.mqtt.publish(&arm_topic, QoS::AtLeastOnce, false, arm_payload).await;
+    let mqtt_timeout = Duration::from_millis(500);
+    let r1 = timeout(mqtt_timeout, state.mqtt.publish(&light_topic,  QoS::AtLeastOnce, false, light)).await;
+    let r2 = timeout(mqtt_timeout, state.mqtt.publish(&buzzer_topic, QoS::AtLeastOnce, false, buzzer)).await;
+    let r3 = timeout(mqtt_timeout, state.mqtt.publish(&arm_topic,    QoS::AtLeastOnce, false, arm_payload)).await;
 
-    let published = r1.is_ok() && r2.is_ok() && r3.is_ok();
+    let published = r1.map(|r| r.is_ok()).unwrap_or(false)
+        && r2.map(|r| r.is_ok()).unwrap_or(false)
+        && r3.map(|r| r.is_ok()).unwrap_or(false);
     if !published {
         warn!(action = %req.action, level = %req.level, "one or more MQTT publishes failed");
     }

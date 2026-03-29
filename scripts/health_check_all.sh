@@ -5,7 +5,7 @@ set -euo pipefail
 BOLD='\033[1m' GREEN='\033[32m' RED='\033[31m' RESET='\033[0m'
 
 SERVICES=(
-    "alarm_grader:http://127.0.0.1:8080/summary"
+    "alarm_grader:http://127.0.0.1:8780/summary"
     "safetyagent:http://127.0.0.1:8081/health"
     "face_db:http://127.0.0.1:8087/faces"
     "decision_agent:http://127.0.0.1:8085/health"

@@ -8,9 +8,9 @@ Wants=fastvlm.service
 Type=simple
 User=crew
 Group=crew
-WorkingDirectory=/home/crew/git/nuclear-camera
+WorkingDirectory=/data/git/nuclear-eye
 EnvironmentFile=-/home/crew/.config/nuclear-eye/env
-Environment=CAMERA_CONFIG=/home/crew/git/nuclear-camera/cameras.toml
+Environment=CAMERA_CONFIG=/data/git/nuclear-eye/cameras.toml
 ExecStart=/home/crew/.venv/nuclear/bin/uvicorn main:app --host 0.0.0.0 --port 8092
 Restart=on-failure
 RestartSec=10s
