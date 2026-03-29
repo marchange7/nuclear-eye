@@ -1,0 +1,28 @@
+[Unit]
+Description=Nuclear Eye — House Sentinel (protected action evaluator)
+Documentation=https://github.com/marchange7/nuclear-eye
+After=network.target nuclear-eye-alarm-grader.service
+Wants=nuclear-eye-alarm-grader.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=no
+User=crew
+Group=crew
+WorkingDirectory=/home/crew/git/nuclear-eye
+EnvironmentFile=-/home/crew/.config/nuclear-eye/env
+Environment=RUST_LOG=info
+# Required env:
+#   HOUSE_JWT_TOKEN=<token>
+#   FORTRESS_BASE_URL=http://127.0.0.1:7710
+#   IDENTITY_BASE_URL=http://127.0.0.1:7720
+# CLI usage (via systemd-run or direct):
+#   house-sentinel --action motion-alert --kind alarm_escalation --context "zone:front"
+ExecStart=/home/crew/git/nuclear-eye/target/release/house-sentinel \
+    --action health-check \
+    --kind observe_only
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
