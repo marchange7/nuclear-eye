@@ -1,5 +1,5 @@
 use anyhow::{Context, Result};
-use nuclear_eye::{now_ms, SecurityConfig, VisionEvent};
+use nuclear_eye::{caption_to_vision_event, now_ms, SecurityConfig, VisionEvent};
 use nuclear_eye::memory::SecurityMemory;
 use reqwest::Client;
 use std::sync::{Arc, Mutex};
@@ -52,8 +52,13 @@ async fn main() -> Result<()> {
         }
     });
 
-    let snapshot_url = std::env::var("SNAPSHOT_URL").ok();
-    let fastvlm_url   = cfg.fastvlm_url.clone();
+    // Env var > vision config > top-level fastvlm_url
+    let snapshot_url = std::env::var("CAMERA_SNAPSHOT_URL").ok()
+        .or_else(|| std::env::var("SNAPSHOT_URL").ok())
+        .or_else(|| cfg.vision.snapshot_url.clone());
+    let fastvlm_url = std::env::var("FASTVLM_URL").ok()
+        .or_else(|| cfg.vision.fastvlm_url.clone())
+        .or_else(|| cfg.fastvlm_url.clone());
 
     if let Some(ref snap) = snapshot_url {
         info!("vision_agent.mode=real snapshot_url={snap} target_url={target_url} camera_id={camera_id}");
@@ -196,83 +201,7 @@ async fn capture_and_analyze(
 
     let caption = describe_image(fastvlm_url, &image_bytes).await?;
     info!("vlm.caption: {caption}");
-    Some(caption_to_vision_event_enhanced(camera_id, &caption, now_ms()))
-}
-
-/// Parse a FastVLM caption into a rich VisionEvent with keyword-derived risk/stress scores.
-fn caption_to_vision_event_enhanced(camera_id: &str, caption: &str, ts: u64) -> VisionEvent {
-    let lower = caption.to_lowercase();
-
-    let risk_score = {
-        let mut r = 0.2f64;
-        if lower.contains("person") || lower.contains("people") || lower.contains(" man ") || lower.contains("woman") { r += 0.25; }
-        if lower.contains("running") || lower.contains("rushing") || lower.contains("sprinting") { r += 0.25; }
-        if lower.contains("weapon") || lower.contains("gun") || lower.contains("knife") || lower.contains("firearm") { r += 0.55; }
-        if lower.contains("fight") || lower.contains("struggle") || lower.contains("attack") { r += 0.4; }
-        if lower.contains("loitering") || lower.contains("suspicious") || lower.contains("lurking") { r += 0.3; }
-        if lower.contains("breaking") || lower.contains("forced") || lower.contains("intruder") { r += 0.45; }
-        if lower.contains("calm") || lower.contains("standing") || lower.contains("walking normally") { r -= 0.1; }
-        r.clamp(0.0, 1.0)
-    };
-
-    let stress_level = {
-        let mut s = 0.15f64;
-        let person_mentions =
-            lower.matches("person").count()
-            + lower.matches("people").count()
-            + lower.matches(" man ").count()
-            + lower.matches("woman").count();
-        s += (person_mentions as f64) * 0.12;
-        if lower.contains("running") || lower.contains("fast") || lower.contains("rushing") { s += 0.3; }
-        if lower.contains("crowd") || lower.contains("group") || lower.contains("several") { s += 0.25; }
-        if lower.contains("argument") || lower.contains("shouting") || lower.contains("aggressive") { s += 0.35; }
-        s.clamp(0.0, 1.0)
-    };
-
-    let confidence = if caption.len() > 60 { 0.83 } else if caption.len() > 25 { 0.66 } else { 0.48 };
-
-    let person_detected = lower.contains("person") || lower.contains("people")
-        || lower.contains(" man ") || lower.contains("woman") || lower.contains("individual");
-
-    let behavior = if lower.contains("weapon") || lower.contains("gun") || lower.contains("knife") {
-        "weapon_detected"
-    } else if lower.contains("fight") || lower.contains("struggle") {
-        "fighting"
-    } else if lower.contains("running") || lower.contains("rushing") {
-        "running"
-    } else if lower.contains("loitering") || lower.contains("suspicious") {
-        "loitering"
-    } else if person_detected {
-        "passby"
-    } else {
-        "no_activity"
-    };
-
-    let object_held = if lower.contains("gun") || lower.contains("weapon") || lower.contains("firearm") {
-        Some("weapon".into())
-    } else if lower.contains("phone") || lower.contains("smartphone") {
-        Some("phone".into())
-    } else if lower.contains("bag") || lower.contains("backpack") || lower.contains("suitcase") {
-        Some("bag".into())
-    } else {
-        None
-    };
-
-    VisionEvent {
-        event_id: Uuid::new_v4().to_string(),
-        timestamp_ms: ts,
-        camera_id: camera_id.to_string(),
-        behavior: behavior.to_string(),
-        risk_score,
-        stress_level,
-        confidence,
-        person_detected,
-        person_name: None,
-        hands_visible: if lower.contains("hand") || lower.contains("holding") { 1 } else { 0 },
-        object_held,
-        extra_tags: vec!["m4-camera".into(), "fastvlm-real".into()],
-        vlm_caption: Some(caption.to_string()),
-    }
+    Some(caption_to_vision_event(camera_id, &caption, now_ms()))
 }
 
 async fn describe_image(fastvlm_url: &str, image_bytes: &[u8]) -> Option<String> {

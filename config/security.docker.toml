@@ -1,0 +1,32 @@
+[app]
+bind_alarm_grader = "0.0.0.0:8080"
+bind_safetyagent = "0.0.0.0:8081"
+bind_face_db = "0.0.0.0:8087"
+alarm_grader_url = "http://alarm-grader:8080"
+face_db_path = "data/face_db.sqlite"
+scene_mode = "security-only"
+model_path = "models/yolov8n.onnx"
+
+[alarm]
+history_len = 20
+hysteresis_window = 5
+thresholds = [0.30, 0.50, 0.80]
+telegram_min_level = "medium"
+
+[telegram]
+enabled = false
+bot_token_env = "TELEGRAM_BOT_TOKEN"
+chat_id_env = "TELEGRAM_CHAT_ID"
+
+[face_db]
+auto_create = true
+
+[vision]
+tick_ms = 2500
+default_camera_id = "front-door"
+target_url = "http://alarm-grader:8080/ingest"
+
+[fortress]
+url = "http://host.docker.internal:7700"
+mesh_enabled = true
+publish_timeout_ms = 500

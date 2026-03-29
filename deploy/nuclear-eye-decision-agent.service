@@ -1,0 +1,25 @@
+[Unit]
+Description=Nuclear Eye — Decision Agent (port 8085)
+Documentation=https://github.com/marchange7/nuclear-eye
+After=network.target nuclear-eye-alarm-grader.service
+Requires=nuclear-eye-alarm-grader.service
+
+[Service]
+Type=simple
+User=crew
+Group=crew
+WorkingDirectory=/home/crew/git/nuclear-eye
+EnvironmentFile=-/home/crew/.config/nuclear-eye/env
+Environment=RUST_LOG=info
+Environment=HOUSE_SECURITY_CONFIG=/home/crew/git/nuclear-eye/config/security.toml
+Environment=DECISION_AGENT_BIND=0.0.0.0:8085
+Environment=CONSUL_URL=http://127.0.0.1:7710
+ExecStart=/home/crew/git/nuclear-eye/target/release/decision_agent
+Restart=on-failure
+RestartSec=5s
+StartLimitIntervalSec=60
+StartLimitBurst=5
+TimeoutStopSec=10
+
+[Install]
+WantedBy=multi-user.target

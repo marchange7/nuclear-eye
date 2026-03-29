@@ -1,0 +1,100 @@
+version: "3.9"
+
+services:
+  alarm-grader:
+    image: rust:1.78-bullseye
+    working_dir: /workspace
+    command: ["bash", "-lc", "cargo run --release --bin alarm_grader_agent"]
+    restart: unless-stopped
+    environment:
+      RUST_LOG: info
+      HOUSE_SECURITY_CONFIG: /workspace/config/security.docker.toml
+    ports:
+      - "8080:8080"
+    mem_limit: 256m
+    cpus: 0.75
+    volumes:
+      - ./:/workspace
+
+  safetyagent:
+    image: rust:1.78-bullseye
+    working_dir: /workspace
+    command: ["bash", "-lc", "cargo run --release --bin safetyagent"]
+    restart: unless-stopped
+    environment:
+      RUST_LOG: info
+      HOUSE_SECURITY_CONFIG: /workspace/config/security.docker.toml
+    ports:
+      - "8081:8081"
+    mem_limit: 192m
+    cpus: 0.50
+    volumes:
+      - ./:/workspace
+    depends_on:
+      - alarm-grader
+
+  face-db:
+    image: rust:1.78-bullseye
+    working_dir: /workspace
+    command: ["bash", "-lc", "cargo run --release --bin face_db"]
+    restart: unless-stopped
+    environment:
+      RUST_LOG: info
+      HOUSE_SECURITY_CONFIG: /workspace/config/security.docker.toml
+    ports:
+      - "8087:8087"
+    mem_limit: 160m
+    cpus: 0.35
+    volumes:
+      - ./:/workspace
+
+  decision-agent:
+    image: rust:1.78-bullseye
+    working_dir: /workspace
+    command: ["bash", "-lc", "cargo run --release --bin decision_agent"]
+    restart: unless-stopped
+    environment:
+      RUST_LOG: info
+      HOUSE_SECURITY_CONFIG: /workspace/config/security.docker.toml
+      DECISION_AGENT_BIND: "0.0.0.0:8085"
+    ports:
+      - "8085:8085"
+    mem_limit: 192m
+    cpus: 0.50
+    volumes:
+      - ./:/workspace
+
+  safety-aurelie-agent:
+    image: rust:1.78-bullseye
+    working_dir: /workspace
+    command: ["bash", "-lc", "cargo run --release --bin safety_aurelie_agent"]
+    restart: unless-stopped
+    environment:
+      RUST_LOG: info
+      HOUSE_SECURITY_CONFIG: /workspace/config/security.docker.toml
+      SAFETY_AURELIE_BIND: "0.0.0.0:8086"
+      AURELIE_CHAT_URL: "http://host.docker.internal:8090/chat"
+    ports:
+      - "8086:8086"
+    mem_limit: 192m
+    cpus: 0.50
+    volumes:
+      - ./:/workspace
+    depends_on:
+      - safetyagent
+
+  vision-agent:
+    image: rust:1.78-bullseye
+    working_dir: /workspace
+    command: ["bash", "-lc", "cargo run --release --bin vision_agent"]
+    restart: unless-stopped
+    environment:
+      RUST_LOG: info
+      HOUSE_SECURITY_CONFIG: /workspace/config/security.docker.toml
+    mem_limit: 192m
+    cpus: 0.50
+    volumes:
+      - ./:/workspace
+      - /dev:/dev
+    depends_on:
+      - safetyagent

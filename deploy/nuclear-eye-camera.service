@@ -1,0 +1,22 @@
+[Unit]
+Description=Nuclear Eye Camera — RTSP/HTTP/iPhone vision ingestion (port 8092)
+Documentation=https://github.com/marchange7/nuclear-eye
+After=network.target fastvlm.service
+Wants=fastvlm.service
+
+[Service]
+Type=simple
+User=crew
+Group=crew
+WorkingDirectory=/home/crew/git/nuclear-camera
+EnvironmentFile=-/home/crew/.config/nuclear-eye/env
+Environment=CAMERA_CONFIG=/home/crew/git/nuclear-camera/cameras.toml
+ExecStart=/home/crew/.venv/nuclear/bin/uvicorn main:app --host 0.0.0.0 --port 8092
+Restart=on-failure
+RestartSec=10s
+StartLimitIntervalSec=60
+StartLimitBurst=5
+TimeoutStopSec=15
+
+[Install]
+WantedBy=multi-user.target

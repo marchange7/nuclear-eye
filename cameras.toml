@@ -2,22 +2,37 @@
 grab_interval_secs = 2
 fastvlm_url = "http://127.0.0.1:8091"
 fortress_url = "http://127.0.0.1:7700"
-house_security_url = "http://127.0.0.1:8081"
+house_security_url = "http://127.0.0.1:8080"
 
 [[cameras]]
 id = "front-door"
 name = "Front Door"
 url = "rtsp://admin:password@192.168.2.100:554/stream1"
-enabled = true
+enabled = false
 
 [[cameras]]
 id = "backyard"
 name = "Backyard"
 url = "rtsp://admin:password@192.168.2.101:554/stream1"
-enabled = true
+enabled = false
 
 [[cameras]]
 id = "garage"
 name = "Garage"
 url = "http://192.168.2.102/snapshot.jpg"
 enabled = false
+
+# M4 built-in webcam (device index 0)
+[[cameras]]
+id = "m4-webcam"
+name = "M4 Built-in Camera"
+url = "device://0"
+enabled = true
+
+# iPhone 17 via Continuity Camera (appears as device index 1 when connected via USB/WiFi)
+# If using an IP camera app instead, replace with: rtsp://192.168.2.XXX:8554/live
+[[cameras]]
+id = "iphone17-continuity"
+name = "iPhone 17 (Continuity Camera)"
+url = "device://1"
+enabled = true

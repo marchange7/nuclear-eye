@@ -1,0 +1,74 @@
+[package]
+name = "nuclear-eye"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+name = "nuclear_eye"
+path = "src/lib.rs"
+
+[[bin]]
+name = "vision_agent"
+path = "src/bin/vision_agent.rs"
+
+[[bin]]
+name = "alarm_grader_agent"
+path = "src/bin/alarm_grader_agent.rs"
+
+[[bin]]
+name = "safetyagent"
+path = "src/bin/safetyagent.rs"
+
+[[bin]]
+name = "face_db"
+path = "src/bin/face_db.rs"
+
+[[bin]]
+name = "decision_agent"
+path = "src/bin/decision_agent.rs"
+
+[[bin]]
+name = "iphone_sensor_agent"
+path = "src/bin/iphone_sensor_agent.rs"
+
+[[bin]]
+name = "safety_aurelie_agent"
+path = "src/bin/safety_aurelie_agent.rs"
+
+[[bin]]
+name = "house-runtime"
+path = "src/bin/house_runtime.rs"
+
+[[bin]]
+name = "house-sentinel"
+path = "src/bin/house_sentinel.rs"
+
+[[bin]]
+name = "actuator_agent"
+path = "src/bin/actuator_agent.rs"
+
+[dependencies]
+anyhow = "1.0"
+clap = { version = "4", features = ["derive", "env"] }
+nuclear-consul = { path = "../nuclear-consul" }
+nuclear-wrapper-core = { path = "../nuclear-wrapper/core" }
+nuclear-voice-client = { path = "../nuclear-platform/fortress/crates/nuclear-voice-client" }
+axum = { version = "0.7", features = ["macros", "ws"] }
+base64 = "0.22"
+chrono = { version = "0.4", features = ["serde"] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+rusqlite = { version = "0.31", features = ["bundled"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+tokio = { version = "1.37", features = ["full"] }
+toml = "0.8"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["fmt", "env-filter"] }
+uuid = { version = "1.8", features = ["v4", "serde"] }
+rumqttc = { version = "0.24", default-features = false, features = ["use-rustls"] }
+
+[profile.release]
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = true

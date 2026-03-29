@@ -1,0 +1,25 @@
+[Unit]
+Description=Nuclear Eye — Actuator Agent / MQTT bridge (port 8086)
+Documentation=https://github.com/marchange7/nuclear-eye
+After=network.target nuclear-eye-alarm-grader.service
+Wants=nuclear-eye-alarm-grader.service
+
+[Service]
+Type=simple
+User=crew
+Group=crew
+WorkingDirectory=/home/crew/git/nuclear-eye
+EnvironmentFile=-/home/crew/.config/nuclear-eye/env
+Environment=RUST_LOG=info
+Environment=HOUSE_SECURITY_CONFIG=/home/crew/git/nuclear-eye/config/security.toml
+Environment=ACTUATOR_BIND=0.0.0.0:8086
+Environment=ACTUATOR_MQTT_PORT=1883
+ExecStart=/home/crew/git/nuclear-eye/target/release/actuator_agent
+Restart=on-failure
+RestartSec=5s
+StartLimitIntervalSec=60
+StartLimitBurst=5
+TimeoutStopSec=10
+
+[Install]
+WantedBy=multi-user.target
