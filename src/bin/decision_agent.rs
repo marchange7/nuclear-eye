@@ -26,6 +26,8 @@ struct AppState {
     consul: ConsulClient,
     memory: Arc<Mutex<SecurityMemory>>,
     consul_url: String,
+    fortress_url: String,
+    fortress_api_token: String,
 }
 
 // ── Request / Response types ───────────────────────────────────────────
@@ -99,11 +101,16 @@ async fn main() -> Result<()> {
     std::fs::create_dir_all(std::path::Path::new(&memory_path).parent().unwrap())?;
     let memory = Arc::new(Mutex::new(SecurityMemory::open(&memory_path)?));
 
+    let fortress_url       = std::env::var("FORTRESS_URL").unwrap_or_else(|_| cfg.fortress_url());
+    let fortress_api_token = std::env::var("FORTRESS_API_TOKEN").unwrap_or_default();
+
     let state = AppState {
         safety_risk_threshold: cfg.decision.safety_risk_threshold,
         consul,
         memory: memory.clone(),
         consul_url: consul_url.clone(),
+        fortress_url,
+        fortress_api_token,
     };
 
     // ── Background health check ──────────────────────────────────────────
@@ -264,6 +271,20 @@ async fn handle_decide(
         ) {
             warn!("failed to log decision to SQLite: {e}");
         }
+    }
+
+    // Fire-and-forget: feed decision to La Rivière (dual-write, SQLite is the fallback)
+    {
+        let content = format!(
+            "Decide::{} @ {} — {} (J={:.2}, doubt={:.2}, det={:.2}, safety={is_safety_critical})",
+            action, req.event.camera_id, req.event.behavior,
+            triad.judgement, triad.doubt, triad.determination,
+        );
+        let url   = state.fortress_url.clone();
+        let token = state.fortress_api_token.clone();
+        tokio::spawn(async move {
+            nuclear_eye::riviere::post_event("nuclear-eye", "camera", &content, &url, &token).await;
+        });
     }
 
     info!(

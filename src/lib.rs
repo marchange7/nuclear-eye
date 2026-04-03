@@ -2,6 +2,7 @@ pub mod consul;
 pub mod guard;
 pub mod house;
 pub mod memory;
+pub mod riviere;
 pub mod runtime;
 pub mod types;
 
@@ -257,7 +258,7 @@ impl Default for AurelieBridgeConfig {
     fn default() -> Self {
         Self {
             bind: "0.0.0.0:8086".into(),
-            aurelie_chat_url: "http://127.0.0.1:8090/chat".into(),
+            aurelie_chat_url: "http://127.0.0.1:8090/api/safety".into(),
             request_timeout_secs: 30,
             telegram_on_alarm: true,
         }

@@ -306,6 +306,22 @@ async fn process_event(
         }
     }
 
+    // Fire-and-forget: feed alarm decision to La Rivière (dual-write, SQLite is the fallback)
+    {
+        let triad   = AffectTriad::from_alarm_event(&alarm);
+        let action  = decide(&triad, alarm.level == AlarmLevel::High).to_string();
+        let content = format!(
+            "AlarmLevel::{} @ {} — {} — {} (J={:.2}, doubt={:.2}, det={:.2})",
+            alarm.level, event.camera_id, event.behavior, action,
+            triad.judgement, triad.doubt, triad.determination,
+        );
+        let url   = state.fortress_url.clone();
+        let token = state.fortress_api_token.clone();
+        tokio::spawn(async move {
+            nuclear_eye::riviere::post_event("nuclear-eye", "camera", &content, &url, &token).await;
+        });
+    }
+
     // Synthesize voice alert for High alarms via nuclear-voice-client.
     let audio_b64 = if alarm.level == AlarmLevel::High {
         if let Some(vc) = nuclear_voice_client::VoiceClient::from_env() {
@@ -316,7 +332,7 @@ async fn process_event(
                 "es" => format!("Alerta de seguridad — nivel de peligro detectado en {location}"),
                 _ => format!("Alerte sécurité — niveau danger détecté à {location}"),
             };
-            vc.speak(&alert_text, Some("decisive"), Some(&state.alert_lang)).await
+            vc.speak_audio_only(&alert_text, Some("decisive"), Some(&state.alert_lang)).await
         } else {
             None
         }
