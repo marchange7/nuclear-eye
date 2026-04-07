@@ -18,71 +18,67 @@ use tracing::{error, info, instrument, warn};
 #[derive(Clone)]
 struct AppState {
     client: Client,
-    aurelie_chat_url: String,
+    /// Aurelia POST /api/safety endpoint URL.
+    aurelia_safety_url: String,
     telegram: Option<TelegramNotifier>,
     telegram_on_alarm: bool,
     fortress_url: String,
     fortress_enabled: bool,
 }
 
-// ── Aurélie chat protocol ──────────────────────────────────────────────
+// ── Aurelia /api/safety protocol ──────────────────────────────────────
 
+/// Structured alarm payload for Aurelia's `/api/safety` endpoint.
+/// Aurelia builds the empathetic prompt internally — no freeform text encoding.
 #[derive(Debug, Serialize)]
-struct AurelieChatPayload {
-    user_id: String,
-    text: String,
-    context: AurelieMultiModalContext,
+struct SafetyAlarmRequest {
+    /// "low" | "medium" | "high"
+    severity: String,
+    zone: String,
+    danger_score: f64,
+    message: String,
+    person_name: Option<String>,
+    stress_level: Option<f64>,
 }
 
-/// Minimal subset of Aurélie's MultiModalContext — enough to let her
-/// generate an empathetic response from an alarm event.
-#[derive(Debug, Serialize)]
-struct AurelieMultiModalContext {
-    user_id: String,
-    timestamp_ms: u64,
-    behavior: String,
-    stress_level: f32,
-    voice_emotion: String,
-    voice_energy: f32,
-    intimacy_level: f32,
-    trust_score: f32,
-    hand_gesture: Option<String>,
-    object_held: Option<String>,
-    recent_moods: Vec<String>,
-}
-
-impl AurelieMultiModalContext {
+impl SafetyAlarmRequest {
     fn from_alarm(alarm: &AlarmEvent) -> Self {
-        let triad = AffectTriad::from_alarm_event(alarm);
         Self {
-            user_id: alarm
-                .person_name
-                .clone()
-                .unwrap_or_else(|| "unknown".into()),
-            timestamp_ms: alarm.timestamp_ms,
-            behavior: alarm.note.clone(),
-            stress_level: alarm.stress_level as f32,
-            voice_emotion: triad.dominant().into(),
-            voice_energy: 0.7,
-            intimacy_level: 0.3,
-            trust_score: 0.5,
-            hand_gesture: None,
-            object_held: None,
-            recent_moods: vec![format!("alarm-{}", alarm.level)],
+            severity: alarm.level.to_string().to_lowercase(),
+            // AlarmEvent has no zone field yet — derive from VLM caption or default
+            zone: alarm
+                .vlm_caption
+                .as_deref()
+                .and_then(|c| {
+                    // "zone:front-door ..." style hint in caption
+                    c.split_whitespace()
+                        .find(|w| w.starts_with("zone:"))
+                        .map(|w| w.trim_start_matches("zone:").to_string())
+                })
+                .unwrap_or_else(|| "perimeter".into()),
+            danger_score: alarm.danger_score,
+            message: alarm.note.clone(),
+            person_name: alarm.person_name.clone(),
+            stress_level: Some(alarm.stress_level),
         }
     }
 }
 
 #[derive(Debug, Deserialize)]
-struct AurelieChatResponse {
+struct SafetyAlarmResponse {
     reply: String,
+    action: String,
+    #[allow(dead_code)]
+    level: String,
+    #[allow(dead_code)]
+    conversation_id: uuid::Uuid,
 }
 
 // ── Response types ─────────────────────────────────────────────────────
 
 #[derive(Debug, Serialize)]
 struct AlertResponse {
-    aurelie_reply: String,
+    aurelia_reply: String,
     triad: AffectTriad,
     action: String,
     alarm_level: String,
@@ -133,7 +129,9 @@ async fn main() -> Result<()> {
     let bind = std::env::var("SAFETY_AURELIE_BIND")
         .unwrap_or_else(|_| cfg.aurelie_bridge.bind.clone());
 
-    let aurelie_chat_url = std::env::var("AURELIE_CHAT_URL")
+    // AURELIE_CHAT_URL kept for backward-compat; new canonical name is AURELIA_SAFETY_URL
+    let aurelia_safety_url = std::env::var("AURELIA_SAFETY_URL")
+        .or_else(|_| std::env::var("AURELIE_CHAT_URL"))
         .unwrap_or_else(|_| cfg.aurelie_bridge.aurelie_chat_url.clone());
 
     let fortress_url = cfg.fortress_url();
@@ -141,7 +139,7 @@ async fn main() -> Result<()> {
 
     let state = AppState {
         client,
-        aurelie_chat_url,
+        aurelia_safety_url,
         telegram,
         telegram_on_alarm: cfg.aurelie_bridge.telegram_on_alarm,
         fortress_url,
@@ -154,7 +152,7 @@ async fn main() -> Result<()> {
         .with_state(state);
 
     let listener = tokio::net::TcpListener::bind(&bind).await?;
-    info!(bind = %bind, "safety_aurelie_agent started");
+    info!(bind = %bind, "safety_aurelie_agent started (→ Aurelia /api/safety)");
 
     axum::serve(listener, app)
         .with_graceful_shutdown(shutdown_signal())
@@ -218,11 +216,11 @@ async fn handle_alert(
         level = %alarm.level,
         %triad,
         %action,
-        "processing alarm"
+        "processing alarm → Aurelia /api/safety"
     );
 
-    // Call Aurélie with one retry on network failure
-    let aurelie_reply = call_aurelie_with_retry(&state, &alarm).await;
+    // Call Aurelia's /api/safety with one retry on network failure
+    let (aurelia_reply, aurelia_action) = call_aurelia_with_retry(&state, &alarm).await;
 
     // Optionally soften Telegram tone based on user's relational mood
     let user_mood = if state.fortress_enabled {
@@ -232,74 +230,70 @@ async fn handle_alert(
     };
 
     // Telegram notification (fire-and-forget, errors logged)
-    let telegram_sent = maybe_send_telegram(&state, &alarm, &triad, &action, &aurelie_reply, user_mood.as_deref()).await;
+    let telegram_sent = maybe_send_telegram(
+        &state,
+        &alarm,
+        &triad,
+        &action,
+        &aurelia_reply,
+        user_mood.as_deref(),
+    )
+    .await;
 
     info!(
-        reply_len = aurelie_reply.len(),
+        reply_len = aurelia_reply.len(),
         telegram_sent,
         "alert processed"
     );
 
     Ok(Json(AlertResponse {
-        aurelie_reply,
+        aurelia_reply,
         triad,
-        action: action.to_string(),
+        // Prefer Aurelia's action decision; fall back to local decide()
+        action: aurelia_action.unwrap_or_else(|| action.to_string()),
         alarm_level: alarm.level.to_string(),
         telegram_sent,
     }))
 }
 
-// ── Aurélie HTTP call with retry ───────────────────────────────────────
+// ── Aurelia HTTP call with retry ───────────────────────────────────────
 
-async fn call_aurelie_with_retry(state: &AppState, alarm: &AlarmEvent) -> String {
-    match call_aurelie(state, alarm).await {
-        Ok(reply) => reply,
+async fn call_aurelia_with_retry(state: &AppState, alarm: &AlarmEvent) -> (String, Option<String>) {
+    match call_aurelia(state, alarm).await {
+        Ok(resp) => (resp.reply, Some(resp.action)),
         Err(first_err) => {
-            warn!(%first_err, "first Aurélie call failed, retrying");
+            warn!(%first_err, "first Aurelia /api/safety call failed, retrying");
             tokio::time::sleep(Duration::from_millis(500)).await;
-            match call_aurelie(state, alarm).await {
-                Ok(reply) => reply,
+            match call_aurelia(state, alarm).await {
+                Ok(resp) => (resp.reply, Some(resp.action)),
                 Err(retry_err) => {
-                    error!(%retry_err, "Aurélie unreachable after retry");
-                    fallback_response(alarm, &decide(&AffectTriad::from_alarm_event(alarm), true))
+                    error!(%retry_err, "Aurelia unreachable after retry");
+                    (fallback_response(alarm, &decide(&AffectTriad::from_alarm_event(alarm), true)), None)
                 }
             }
         }
     }
 }
 
-async fn call_aurelie(state: &AppState, alarm: &AlarmEvent) -> Result<String> {
-    let ctx = AurelieMultiModalContext::from_alarm(alarm);
-    let alarm_text = format!(
-        "[ALERTE SÉCURITÉ – niveau {}] Danger {:.2}, stress {:.2}. {}",
-        alarm.level, alarm.danger_score, alarm.stress_level, alarm.note,
-    );
-
-    let payload = AurelieChatPayload {
-        user_id: ctx.user_id.clone(),
-        text: alarm_text,
-        context: ctx,
-    };
+async fn call_aurelia(state: &AppState, alarm: &AlarmEvent) -> Result<SafetyAlarmResponse> {
+    let payload = SafetyAlarmRequest::from_alarm(alarm);
 
     let resp = state
         .client
-        .post(&state.aurelie_chat_url)
+        .post(&state.aurelia_safety_url)
         .json(&payload)
         .send()
         .await
-        .context("HTTP request to Aurélie failed")?;
+        .context("HTTP request to Aurelia /api/safety failed")?;
 
     let status = resp.status();
     if !status.is_success() {
-        anyhow::bail!("Aurélie returned HTTP {status}");
+        anyhow::bail!("Aurelia /api/safety returned HTTP {status}");
     }
 
-    let body: AurelieChatResponse = resp
-        .json()
+    resp.json::<SafetyAlarmResponse>()
         .await
-        .context("failed to parse Aurélie response")?;
-
-    Ok(body.reply)
+        .context("failed to parse Aurelia SafetyAlarmResponse")
 }
 
 fn fallback_response(alarm: &AlarmEvent, action: &DecisionAction) -> String {
@@ -325,7 +319,7 @@ async fn maybe_send_telegram(
     alarm: &AlarmEvent,
     triad: &AffectTriad,
     action: &DecisionAction,
-    aurelie_reply: &str,
+    aurelia_reply: &str,
     user_mood: Option<&str>,
 ) -> bool {
     if !state.telegram_on_alarm {
@@ -345,15 +339,15 @@ async fn maybe_send_telegram(
             "🏠 Mise à jour sécurité\n\
              Niveau: {} (risque {:.2})\n\
              Situation: {}\n\
-             Aurélie: {aurelie_reply}",
+             Aurelia: {aurelia_reply}",
             alarm.level, alarm.danger_score, alarm.note,
         )
     } else {
         format!(
-            "🏠 Safety→Aurélie\n\
+            "🏠 Safety→Aurelia\n\
              Alarm: {} (danger {:.2})\n\
              Triad: {triad} → {action}\n\
-             Aurélie: {aurelie_reply}",
+             Aurelia: {aurelia_reply}",
             alarm.level, alarm.danger_score,
         )
     };
