@@ -1475,6 +1475,7 @@ dependencies = [
  "chrono",
  "clap",
  "nuclear-consul",
+ "nuclear-sdk",
  "nuclear-voice-client",
  "nuclear-wrapper-core",
  "reqwest",
@@ -1486,6 +1487,22 @@ dependencies = [
  "toml",
  "tracing",
  "tracing-subscriber",
+ "uuid",
+]
+
+[[package]]
+name = "nuclear-sdk"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "tokio",
+ "toml",
+ "tracing",
+ "url",
  "uuid",
 ]
 

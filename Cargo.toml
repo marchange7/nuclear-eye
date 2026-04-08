@@ -48,6 +48,7 @@ name = "actuator_agent"
 path = "src/bin/actuator_agent.rs"
 
 [dependencies]
+nuclear-sdk = { path = "../nuclear-sdk/crates/nuclear-sdk", default-features = false, features = ["fortress", "penny", "consul"] }
 anyhow = "1.0"
 clap = { version = "4", features = ["derive", "env"] }
 nuclear-consul = { path = "../nuclear-consul" }

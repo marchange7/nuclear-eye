@@ -2,7 +2,7 @@
 ///
 /// Supports two backends, selected at runtime via `CONSUL_BACKEND`:
 ///
-/// - `local`  (default) — POST to nuclear-platform fortress `/consul/query`
+/// - `local`  (default) — POST to nuclear-consul via nuclear-sdk.
 ///            Timeout: 80 ms (inside the 100 ms alarm-grading SLA).
 ///
 /// - `cloud`  — POST to Anthropic Claude API (claude-haiku-4-5-20251001)
@@ -12,32 +12,11 @@
 ///
 /// Consul unreachability / API errors are never fatal — the caller always
 /// gets `None` and the local alarm grade stands unchanged.
+use nuclear_sdk::{NuclearClient, types::routing::ConsulQuery};
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use std::time::Duration;
 use tokio::task::JoinHandle;
-
-// ── Local backend types ───────────────────────────────────────────────
-
-#[derive(Debug, Deserialize)]
-struct VoiceVerdict {
-    ok: bool,
-}
-
-#[derive(Debug, Deserialize)]
-struct RawConsulResponse {
-    decision: String,
-    consulted_voices: Vec<VoiceVerdict>,
-}
-
-#[derive(Debug, Serialize)]
-struct ConsulQueryRequest {
-    query: String,
-    caller: Option<String>,
-    context: Option<String>,
-    require_security: Option<bool>,
-    max_output_tokens: Option<u32>,
-}
 
 // ── Cloud backend types ───────────────────────────────────────────────
 
@@ -91,8 +70,8 @@ pub struct ConsulDecision {
 
 #[derive(Clone)]
 enum Backend {
-    Local { url: String },
-    Cloud { api_key: String },
+    Local { nk: NuclearClient },
+    Cloud { api_key: String, client: Client },
 }
 
 // ── Client ────────────────────────────────────────────────────────────
@@ -101,21 +80,15 @@ enum Backend {
 pub struct ConsulClient {
     pub timeout_ms: u64,
     backend: Backend,
-    client: Client,
 }
 
 impl ConsulClient {
     /// Create a client from `consul_url` and `timeout_ms`.
     ///
     /// Reads `CONSUL_BACKEND` at construction time:
-    ///   `local`  → calls `consul_url`/consul/query  (default)
+    ///   `local`  → calls nuclear-consul via nuclear-sdk (default)
     ///   `cloud`  → calls Anthropic API, ignores `consul_url`
     pub fn new(consul_url: String, timeout_ms: u64) -> Self {
-        let client = Client::builder()
-            .timeout(Duration::from_millis(timeout_ms + 500))
-            .build()
-            .expect("reqwest client for ConsulClient");
-
         let backend_env = std::env::var("CONSUL_BACKEND")
             .unwrap_or_else(|_| "local".to_string());
 
@@ -124,17 +97,21 @@ impl ConsulClient {
                 .unwrap_or_default();
             if api_key.is_empty() {
                 tracing::warn!("CONSUL_BACKEND=cloud but ANTHROPIC_API_KEY is unset — falling back to local");
-                Backend::Local { url: consul_url }
+                Backend::Local { nk: build_consul_nk(&consul_url) }
             } else {
                 tracing::info!("consul: cloud backend (Claude API)");
-                Backend::Cloud { api_key }
+                let client = Client::builder()
+                    .timeout(Duration::from_millis(timeout_ms + 500))
+                    .build()
+                    .expect("reqwest client for ConsulClient cloud");
+                Backend::Cloud { api_key, client }
             }
         } else {
             tracing::info!("consul: local backend → {consul_url}");
-            Backend::Local { url: consul_url }
+            Backend::Local { nk: build_consul_nk(&consul_url) }
         };
 
-        Self { timeout_ms, backend, client }
+        Self { timeout_ms, backend }
     }
 
     /// Fire a Consul query in a background task and return its handle.
@@ -142,17 +119,16 @@ impl ConsulClient {
     /// Call with `tokio::time::timeout(…, handle).await` to merge the result
     /// if it arrives in time, or drop the handle for fire-and-forget.
     pub fn query_async(&self, question: &str) -> JoinHandle<Option<ConsulDecision>> {
-        let client = self.client.clone();
         let timeout_ms = self.timeout_ms;
         let question = question.to_string();
         let backend = self.backend.clone();
 
         tokio::spawn(async move {
             match backend {
-                Backend::Local { url } => {
-                    query_local(client, url, question, timeout_ms).await
+                Backend::Local { nk } => {
+                    query_local(nk, question, timeout_ms).await
                 }
-                Backend::Cloud { api_key } => {
+                Backend::Cloud { api_key, client } => {
                     query_cloud(client, api_key, question, timeout_ms).await
                 }
             }
@@ -166,44 +142,55 @@ impl Default for ConsulClient {
     }
 }
 
-// ── Local backend ─────────────────────────────────────────────────────
+/// Build a NuclearClient for the consul endpoint.
+/// Uses the explicit URL if provided, otherwise falls back to system config.
+fn build_consul_nk(consul_url: &str) -> NuclearClient {
+    let mut config = nuclear_sdk::NuclearConfig::from_system()
+        .expect("NuclearConfig for consul backend");
+    if !consul_url.is_empty() {
+        if let Ok(url) = consul_url.parse() {
+            config.consul_url = url;
+        }
+    }
+    NuclearClient::from_config(config)
+        .expect("NuclearClient for consul backend")
+}
+
+// ── Local backend (nuclear-consul via SDK) ────────────────────────────
 
 async fn query_local(
-    client: Client,
-    url: String,
+    nk: NuclearClient,
     question: String,
     timeout_ms: u64,
 ) -> Option<ConsulDecision> {
-    let endpoint = format!("{url}/consul/query");
-    let req = ConsulQueryRequest {
+    let q = ConsulQuery {
         query: question,
         caller: Some("nuclear-eye".to_string()),
         context: Some("alarm grader high-severity security assessment".to_string()),
-        require_security: Some(true),
+        require_security: true,
+        require_ethics: false,
         max_output_tokens: Some(150),
     };
 
     let result = tokio::time::timeout(
         Duration::from_millis(timeout_ms),
-        client.post(&endpoint).json(&req).send(),
+        nk.consul().query(&q),
     )
     .await;
 
     match result {
-        Ok(Ok(resp)) if resp.status().is_success() => {
-            match resp.json::<RawConsulResponse>().await {
-                Ok(r) => {
-                    let total = r.consulted_voices.len();
-                    let ok_votes = r.consulted_voices.iter().filter(|v| v.ok).count();
-                    let confidence = if total > 0 { ok_votes as f64 / total as f64 } else { 0.5 };
-                    Some(ConsulDecision { decision: r.decision, confidence, voices: total })
-                }
-                Err(e) => { tracing::debug!("consul local: parse error: {e}"); None }
-            }
+        Ok(Ok(cd)) => {
+            let total = cd.consulted_voices.len();
+            let ok_votes = cd.consulted_voices.iter().filter(|v| v.ok).count();
+            let confidence = if total > 0 { ok_votes as f64 / total as f64 } else { 0.5 };
+            Some(ConsulDecision {
+                decision: cd.decision,
+                confidence,
+                voices: total,
+            })
         }
-        Ok(Ok(resp)) => { tracing::debug!("consul local: status {}", resp.status()); None }
-        Ok(Err(e)) => { tracing::debug!("consul local: request error: {e}"); None }
-        Err(_) => { tracing::debug!("consul local: timed out (>{timeout_ms} ms)"); None }
+        Ok(Err(e)) => { tracing::debug!("consul local: error: {e}"); None }
+        Err(_)     => { tracing::debug!("consul local: timed out (>{timeout_ms} ms)"); None }
     }
 }
 
@@ -252,8 +239,6 @@ async fn query_cloud(
                         .find(|b| b.block_type == "text")
                         .and_then(|b| b.text)?;
 
-                    // Try to parse the JSON verdict Claude was asked to produce.
-                    // If it added prose around it, find the first `{…}` substring.
                     let verdict: ClaudeVerdict = if let Ok(v) = serde_json::from_str(&text) {
                         v
                     } else if let Some(start) = text.find('{') {
