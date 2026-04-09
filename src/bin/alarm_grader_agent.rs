@@ -7,8 +7,9 @@ use axum::{
     routing::{get, post},
     Json, Router,
 };
-use nuclear_eye::{decide, AffectTriad, AlarmEvent, AlarmGrader, AlarmLevel, AlarmSummary, ConsulClient, SecurityConfig, VisionEvent};
+use nuclear_eye::{decide, riviere, AffectTriad, AlarmEvent, AlarmGrader, AlarmLevel, AlarmSummary, ConsulClient, SecurityConfig, VisionEvent};
 use nuclear_eye::memory::SecurityMemory;
+use nuclear_sdk::NuclearClient;
 use serde::{Deserialize, Serialize};
 use tokio::sync::{broadcast, Mutex};
 use tracing::{info, warn};
@@ -17,10 +18,11 @@ const CONSUL_TIMEOUT_MS: u64 = 80;
 const WATCH_CHANNEL_CAP: usize = 64;
 const THREAT_KEYWORDS: &[&str] = &["person", "vehicle", "movement", "intrusion"];
 
-/// Events broadcast to nuclear-watch over WebSocket.
+/// Events broadcast to nuclear-watch over WebSocket (O6 adds Pedestrian + Vision).
 #[derive(Debug, Clone, Serialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 enum WatchEvent {
+    /// Alarm level decision — existing event type.
     Alarm {
         ts: u64,
         camera_id: String,
@@ -29,12 +31,27 @@ enum WatchEvent {
         reason: String,
         caption: Option<String>,
     },
+    /// Consul deliberation result — existing event type.
     Decision {
         ts: u64,
         camera_id: String,
         question: String,
         synthesis: String,
         confidence: f64,
+    },
+    /// O6: pedestrian count + position snapshot from vision pipeline.
+    Pedestrian {
+        ts: u64,
+        camera_id: String,
+        count: u32,
+        positions: Vec<serde_json::Value>,
+    },
+    /// O6: scene summary with detected objects from VLM caption.
+    Vision {
+        ts: u64,
+        camera_id: String,
+        scene: String,
+        objects: Vec<String>,
     },
 }
 
@@ -56,13 +73,13 @@ struct CameraFrameResponse {
 struct AppState {
     grader: Arc<Mutex<AlarmGrader>>,
     consul: ConsulClient,
-    fortress_url: String,
-    fortress_api_token: String,
+    nk: NuclearClient,
     fortress_enabled: bool,
     memory: Arc<Mutex<SecurityMemory>>,
-    penny_url: Option<String>,
     watch_tx: broadcast::Sender<String>,
     alert_lang: String,
+    /// Shared HTTP client for La Rivière domain event POSTs (O7).
+    http: reqwest::Client,
 }
 
 #[tokio::main]
@@ -92,13 +109,12 @@ async fn main() -> Result<()> {
 
     let consul_url = std::env::var("CONSUL_URL")
         .unwrap_or_else(|_| "http://127.0.0.1:7710".to_string());
-    let hc_consul_url = format!("{consul_url}/health");
     let consul = ConsulClient::new(consul_url, CONSUL_TIMEOUT_MS);
 
-    let fortress_url = cfg.fortress_url();
-    let fortress_api_token = std::env::var("FORTRESS_API_TOKEN").unwrap_or_default();
+    let nk = NuclearClient::from_system()
+        .expect("NuclearClient: check FORTRESS_URL / PENNY_BRAIN_URL env vars");
+
     let fortress_enabled = cfg.fortress.mesh_enabled;
-    let penny_url = std::env::var("PENNY_BRAIN_URL").ok();
 
     let memory_path = {
         let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
@@ -113,16 +129,20 @@ async fn main() -> Result<()> {
 
     let alert_lang = std::env::var("ALERT_LANG").unwrap_or_else(|_| "fr".to_string());
 
+    let http = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_millis(600))
+        .build()
+        .expect("build HTTP client");
+
     let state = AppState {
         grader: Arc::new(Mutex::new(grader)),
         consul,
-        fortress_url,
-        fortress_api_token,
+        nk: nk.clone(),
         fortress_enabled,
         memory: memory.clone(),
-        penny_url,
         watch_tx,
         alert_lang,
+        http,
     };
 
     let app = Router::new()
@@ -132,15 +152,13 @@ async fn main() -> Result<()> {
         .route("/ws", get(ws_handler))
         .with_state(state);
 
-    // Background: health check every 30s
+    // Background: health check every 30s via SDK
+    let nk_hc = nk.clone();
     let hc_mem = memory.clone();
     tokio::spawn(async move {
-        let client = reqwest::Client::new();
         loop {
             tokio::time::sleep(Duration::from_secs(30)).await;
-            let consul_ok = client.get(&hc_consul_url)
-                .timeout(Duration::from_secs(2)).send().await
-                .map(|r| r.status().is_success()).unwrap_or(false);
+            let consul_ok = nk_hc.consul().health().await.is_ok();
             let buffered = hc_mem.lock().await.buffered_count().unwrap_or(0);
             info!(consul_ok, buffered_events = buffered, "health_check");
         }
@@ -193,22 +211,19 @@ async fn process_event(
         grader.grade_event(&event)
     };
 
-    // For High alarms, fire a Consul deliberation and penny-brain in parallel
-    // with the response path.  Consul gets up to CONSUL_TIMEOUT_MS; penny-brain
-    // gets 500ms.  If neither replies in time, the local decision stands unchanged.
+    // For High alarms, fire Consul deliberation and penny-brain in parallel.
+    // Consul gets up to CONSUL_TIMEOUT_MS; penny-brain gets 500ms.
+    // If neither replies in time, the local decision stands unchanged.
     let consul_note = if alarm.level == AlarmLevel::High {
         let question = format!(
             "House security HIGH alarm: behavior='{}', risk={:.2}, stress={:.2}, confidence={:.2}, person={:?}",
             event.behavior, event.risk_score, event.stress_level, event.confidence, event.person_name
         );
 
-        // Fire penny-brain and consul in parallel
-        let penny_future = async {
-            if let Some(ref penny_url) = state.penny_url {
-                query_penny(penny_url, &question).await
-            } else {
-                None
-            }
+        let penny_future = {
+            let nk = state.nk.clone();
+            let q = question.clone();
+            async move { query_penny(&nk, &q).await }
         };
         let consul_handle = state.consul.query_async(&question);
 
@@ -219,7 +234,6 @@ async fn process_event(
 
         let mut note = String::new();
 
-        // Append consul result
         match consul_result {
             Ok(Ok(Some(cd))) => {
                 info!(
@@ -233,7 +247,6 @@ async fn process_event(
                     " | consul={} conf={:.2} voices={}",
                     cd.decision, cd.confidence, cd.voices
                 ));
-                // Broadcast Consul decision to nuclear-watch
                 if let Ok(json) = serde_json::to_string(&WatchEvent::Decision {
                     ts: event.timestamp_ms,
                     camera_id: event.camera_id.clone(),
@@ -253,7 +266,6 @@ async fn process_event(
             }
         }
 
-        // Append penny-brain result if available
         if let Ok(Some(penny_note)) = penny_result {
             let short = if penny_note.len() > 120 {
                 format!("{}…", &penny_note[..120])
@@ -272,7 +284,84 @@ async fn process_event(
         alarm.note.push_str(extra);
     }
 
-    // Broadcast alarm to nuclear-watch WebSocket clients
+    // ── O7 / Q5: La Rivière FIRST (canonical source of truth) ────────────────
+    //
+    // Fan-out order: La Rivière → WebSocket → Fortress mesh → Telegram
+    // La Rivière is the write-ahead log; WebSocket / mesh are derived views.
+
+    // 1a. vision.person_detected (always, when person_detected = true)
+    if event.person_detected {
+        let http = state.http.clone();
+        let cam_id = event.camera_id.clone();
+        let ts = event.timestamp_ms;
+        tokio::spawn(async move {
+            riviere::emit_person_detected(&http, riviere::PersonDetectedPayload {
+                camera_id: cam_id,
+                count: 1,
+                ts,
+                positions: vec![],
+            }).await;
+        });
+    }
+
+    // 1b. vision.behavior_alert (always — captures every graded event)
+    {
+        let http = state.http.clone();
+        let cam_id = event.camera_id.clone();
+        let behavior = event.behavior.clone();
+        let severity = alarm.level.to_string();
+        let danger_score = alarm.danger_score;
+        let ts = event.timestamp_ms;
+        tokio::spawn(async move {
+            riviere::emit_behavior_alert(&http, riviere::BehaviorAlertPayload {
+                camera_id: cam_id,
+                behavior,
+                severity,
+                danger_score,
+                ts,
+            }).await;
+        });
+    }
+
+    // 1c. vision.scene_captured (when VLM caption available)
+    if let Some(ref caption) = alarm.vlm_caption {
+        let http = state.http.clone();
+        let cam_id = event.camera_id.clone();
+        let scene = caption.clone();
+        let ts = event.timestamp_ms;
+        // Extract objects from extra_tags for richer scene payload
+        let objects: Vec<String> = event.extra_tags.iter()
+            .filter(|t| t.as_str() != "vlm-derived")
+            .cloned()
+            .collect();
+        tokio::spawn(async move {
+            riviere::emit_scene_captured(&http, riviere::SceneCapturedPayload {
+                camera_id: cam_id,
+                scene,
+                ts,
+                objects,
+            }).await;
+        });
+    }
+
+    // 1d. Legacy La Rivière stream (reflection surface — backward compat)
+    {
+        let triad   = AffectTriad::from_alarm_event(&alarm);
+        let action  = decide(&triad, alarm.level == AlarmLevel::High).to_string();
+        let content = format!(
+            "AlarmLevel::{} @ {} — {} — {} (J={:.2}, doubt={:.2}, det={:.2})",
+            alarm.level, event.camera_id, event.behavior, action,
+            triad.judgement, triad.doubt, triad.determination,
+        );
+        let nk = state.nk.clone();
+        tokio::spawn(async move {
+            nuclear_eye::riviere::post_event("nuclear-eye", "camera", &content, &nk).await;
+        });
+    }
+
+    // ── 2. WebSocket broadcast to nuclear-watch (O6 + existing types) ─────────
+
+    // 2a. Alarm event (existing)
     if let Ok(json) = serde_json::to_string(&WatchEvent::Alarm {
         ts: alarm.timestamp_ms,
         camera_id: event.camera_id.clone(),
@@ -284,19 +373,49 @@ async fn process_event(
         let _ = state.watch_tx.send(json);
     }
 
-    // Fire-and-forget publish to Fortress mesh
+    // 2b. Pedestrian event (O6) — emitted when at least one person detected
+    if event.person_detected {
+        if let Ok(json) = serde_json::to_string(&WatchEvent::Pedestrian {
+            ts: event.timestamp_ms,
+            camera_id: event.camera_id.clone(),
+            count: 1,
+            positions: vec![],
+        }) {
+            let _ = state.watch_tx.send(json);
+        }
+    }
+
+    // 2c. Vision scene event (O6) — emitted when VLM caption is available
+    if let Some(ref caption) = event.vlm_caption {
+        let objects: Vec<String> = event.extra_tags.iter()
+            .filter(|t| t.as_str() != "vlm-derived")
+            .cloned()
+            .collect();
+        if let Ok(json) = serde_json::to_string(&WatchEvent::Vision {
+            ts: event.timestamp_ms,
+            camera_id: event.camera_id.clone(),
+            scene: caption.clone(),
+            objects,
+        }) {
+            let _ = state.watch_tx.send(json);
+        }
+    }
+
+    // ── 3. Fortress mesh publish (existing, non-blocking) ─────────────────────
+    // TODO: migrate to nk.fortress().ingest_security() once fortress mesh
+    //       type alignment with SecurityEvent is confirmed.
     if state.fortress_enabled {
         let triad = AffectTriad::from_alarm_event(&alarm);
         let decision = alarm.level.to_string();
-        let fortress_url = state.fortress_url.clone();
-        let api_token = state.fortress_api_token.clone();
+        let fortress_url = state.nk.config().fortress_url().to_string();
+        let api_token = state.nk.config().fortress_token().unwrap_or("").to_string();
         let alarm_clone = alarm.clone();
         tokio::spawn(async move {
             publish_to_mesh(&alarm_clone, &triad, &decision, &fortress_url, &api_token).await;
         });
     }
 
-    // Record alarm to SQLite long-term memory (fire-and-forget; never blocks the response)
+    // ── 4. SQLite long-term memory (existing) ────────────────────────────────
     {
         let mem = state.memory.lock().await;
         let level_str = alarm.level.to_string();
@@ -304,22 +423,6 @@ async fn process_event(
         if let Err(e) = mem.record_alarm(alarm.timestamp_ms, &level_str, alarm.danger_score, note_str, &level_str) {
             tracing::warn!("memory.record_alarm failed: {e}");
         }
-    }
-
-    // Fire-and-forget: feed alarm decision to La Rivière (dual-write, SQLite is the fallback)
-    {
-        let triad   = AffectTriad::from_alarm_event(&alarm);
-        let action  = decide(&triad, alarm.level == AlarmLevel::High).to_string();
-        let content = format!(
-            "AlarmLevel::{} @ {} — {} — {} (J={:.2}, doubt={:.2}, det={:.2})",
-            alarm.level, event.camera_id, event.behavior, action,
-            triad.judgement, triad.doubt, triad.determination,
-        );
-        let url   = state.fortress_url.clone();
-        let token = state.fortress_api_token.clone();
-        tokio::spawn(async move {
-            nuclear_eye::riviere::post_event("nuclear-eye", "camera", &content, &url, &token).await;
-        });
     }
 
     // Synthesize voice alert for High alarms via nuclear-voice-client.
@@ -381,40 +484,20 @@ async fn summary(State(state): State<AppState>) -> Json<AlarmSummary> {
     Json(grader.summary())
 }
 
-async fn query_penny(penny_url: &str, question: &str) -> Option<String> {
-    let client = reqwest::Client::new();
-    let url = format!("{}/route", penny_url.trim_end_matches('/'));
-    let payload = serde_json::json!({ "prompt": question, "history_tokens": 0 });
-    let result = tokio::time::timeout(
-        Duration::from_millis(500),
-        client.post(&url).json(&payload).send(),
-    )
-    .await;
-    match result {
-        Ok(Ok(resp)) if resp.status().is_success() => {
-            if let Ok(body) = resp.json::<serde_json::Value>().await {
-                let text = body["response"].as_str().unwrap_or_default().trim().to_string();
-                if !text.is_empty() {
-                    tracing::debug!(
-                        model = body["model_used"].as_str().unwrap_or("?"),
-                        tier = body["tier"].as_u64().unwrap_or(0),
-                        "penny-brain routed alarm assessment"
-                    );
-                    return Some(text);
-                }
-            }
-            None
+/// Route a question through penny-brain via nuclear-sdk.
+async fn query_penny(nk: &NuclearClient, question: &str) -> Option<String> {
+    match nk.penny().route(question).await {
+        Ok(resp) => {
+            tracing::debug!(
+                model = %resp.model_used,
+                tier = resp.tier,
+                "penny-brain routed alarm assessment"
+            );
+            let text = resp.response.trim().to_string();
+            if text.is_empty() { None } else { Some(text) }
         }
-        Ok(Ok(resp)) => {
-            tracing::warn!(status = %resp.status(), "penny-brain non-success for alarm");
-            None
-        }
-        Ok(Err(e)) => {
+        Err(e) => {
             tracing::warn!(error = %e, "penny-brain request failed");
-            None
-        }
-        Err(_) => {
-            tracing::warn!("penny-brain timed out (500ms)");
             None
         }
     }
@@ -447,6 +530,8 @@ async fn handle_watch_socket(mut socket: WebSocket, mut rx: broadcast::Receiver<
     }
 }
 
+// TODO: replace with nk.fortress().ingest_security() once SecurityEvent type
+//       alignment with the fortress mesh endpoint is confirmed.
 async fn publish_to_mesh(alarm: &AlarmEvent, triad: &AffectTriad, decision: &str, fortress_url: &str, api_token: &str) {
     let client = reqwest::Client::new();
     let payload = serde_json::json!({

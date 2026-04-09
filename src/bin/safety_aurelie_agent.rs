@@ -8,6 +8,7 @@ use axum::{
 use nuclear_eye::{
     decide, AffectTriad, AlarmEvent, DecisionAction, SecurityConfig, TelegramNotifier,
 };
+use nuclear_sdk::NuclearClient;
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use tokio::{signal, time::Duration};
@@ -22,7 +23,7 @@ struct AppState {
     aurelia_safety_url: String,
     telegram: Option<TelegramNotifier>,
     telegram_on_alarm: bool,
-    fortress_url: String,
+    nk: NuclearClient,
     fortress_enabled: bool,
 }
 
@@ -134,15 +135,16 @@ async fn main() -> Result<()> {
         .or_else(|_| std::env::var("AURELIE_CHAT_URL"))
         .unwrap_or_else(|_| cfg.aurelie_bridge.aurelie_chat_url.clone());
 
-    let fortress_url = cfg.fortress_url();
     let fortress_enabled = cfg.fortress.mesh_enabled;
+    let nk = NuclearClient::from_system()
+        .expect("NuclearClient: check FORTRESS_URL env var");
 
     let state = AppState {
         client,
         aurelia_safety_url,
         telegram,
         telegram_on_alarm: cfg.aurelie_bridge.telegram_on_alarm,
-        fortress_url,
+        nk,
         fortress_enabled,
     };
 
@@ -224,7 +226,7 @@ async fn handle_alert(
 
     // Optionally soften Telegram tone based on user's relational mood
     let user_mood = if state.fortress_enabled {
-        get_user_mood(&state.fortress_url).await
+        get_user_mood(&state.nk).await
     } else {
         None
     };
@@ -361,14 +363,7 @@ async fn maybe_send_telegram(
     }
 }
 
-async fn get_user_mood(fortress_url: &str) -> Option<String> {
-    let client = reqwest::Client::new();
-    let resp = client
-        .get(format!("{}/v1/mesh/relational/andrzej", fortress_url))
-        .timeout(std::time::Duration::from_millis(200))
-        .send()
-        .await
-        .ok()?;
-    let json: serde_json::Value = resp.json().await.ok()?;
+async fn get_user_mood(nk: &NuclearClient) -> Option<String> {
+    let json = nk.fortress().get_relational("andrzej").await.ok()?;
     json["mood"].as_str().map(|s| s.to_string())
 }

@@ -159,6 +159,19 @@ async fn main() -> Result<()> {
         .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
         .init();
 
+    // ── Nuclear wrapper — resilience sidecar ────────────────────────────
+    match nuclear_wrapper::wrap!(
+        node_id      = "actuator-agent",
+        pg_url       = std::env::var("DATABASE_URL").unwrap_or_default(),
+        signal_token = std::env::var("SIGNAL_TOKEN").unwrap_or_default()
+    ) {
+        Ok(nw) => {
+            tracing::info!("nuclear-wrapper: armed (tamper, health, discovery)");
+            std::mem::forget(nw);
+        }
+        Err(e) => tracing::warn!("nuclear-wrapper: start failed ({e}) — running unguarded"),
+    }
+
     let bind = std::env::var("ACTUATOR_BIND")
         .unwrap_or_else(|_| "0.0.0.0:8086".to_string());
     let mqtt_host = std::env::var("ACTUATOR_MQTT_HOST")

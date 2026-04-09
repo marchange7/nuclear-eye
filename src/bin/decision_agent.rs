@@ -9,6 +9,7 @@ use nuclear_eye::{
     decide, AffectTriad, ConsulClient, DecisionAction, SecurityConfig, VisionEvent,
 };
 use nuclear_eye::memory::SecurityMemory;
+use nuclear_sdk::NuclearClient;
 use serde::{Deserialize, Serialize};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -25,9 +26,7 @@ struct AppState {
     safety_risk_threshold: f64,
     consul: ConsulClient,
     memory: Arc<Mutex<SecurityMemory>>,
-    consul_url: String,
-    fortress_url: String,
-    fortress_api_token: String,
+    nk: NuclearClient,
 }
 
 // ── Request / Response types ───────────────────────────────────────────
@@ -92,7 +91,10 @@ async fn main() -> Result<()> {
 
     let consul_url = std::env::var("CONSUL_URL")
         .unwrap_or_else(|_| "http://127.0.0.1:7710".to_string());
-    let consul = ConsulClient::new(consul_url.clone(), CONSUL_TIMEOUT_MS);
+    let consul = ConsulClient::new(consul_url, CONSUL_TIMEOUT_MS);
+
+    let nk = NuclearClient::from_system()
+        .expect("NuclearClient: check FORTRESS_URL env var");
 
     let memory_path = {
         let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
@@ -101,31 +103,20 @@ async fn main() -> Result<()> {
     std::fs::create_dir_all(std::path::Path::new(&memory_path).parent().unwrap())?;
     let memory = Arc::new(Mutex::new(SecurityMemory::open(&memory_path)?));
 
-    let fortress_url       = std::env::var("FORTRESS_URL").unwrap_or_else(|_| cfg.fortress_url());
-    let fortress_api_token = std::env::var("FORTRESS_API_TOKEN").unwrap_or_default();
-
     let state = AppState {
         safety_risk_threshold: cfg.decision.safety_risk_threshold,
         consul,
         memory: memory.clone(),
-        consul_url: consul_url.clone(),
-        fortress_url,
-        fortress_api_token,
+        nk: nk.clone(),
     };
 
-    // ── Background health check ──────────────────────────────────────────
-    let hc_consul_url = format!("{consul_url}/health");
+    // ── Background health check via SDK ──────────────────────────────────
+    let nk_hc = nk.clone();
     let hc_mem = memory.clone();
     tokio::spawn(async move {
-        let client = reqwest::Client::builder()
-            .timeout(Duration::from_secs(2))
-            .build()
-            .expect("reqwest client");
         loop {
             tokio::time::sleep(Duration::from_secs(HEALTH_INTERVAL_SECS)).await;
-            let consul_ok = client.get(&hc_consul_url).send().await
-                .map(|r| r.status().is_success())
-                .unwrap_or(false);
+            let consul_ok = nk_hc.consul().health().await.is_ok();
             let buffered = hc_mem.lock().ok()
                 .and_then(|m| m.buffered_count().ok())
                 .unwrap_or(0);
@@ -176,18 +167,7 @@ async fn shutdown_signal() {
 // ── Handlers ───────────────────────────────────────────────────────────
 
 async fn health(State(state): State<AppState>) -> Json<HealthResponse> {
-    let client = reqwest::Client::builder()
-        .timeout(Duration::from_secs(1))
-        .build()
-        .expect("reqwest client");
-
-    let consul_ok = client
-        .get(format!("{}/health", state.consul_url))
-        .send()
-        .await
-        .map(|r| r.status().is_success())
-        .unwrap_or(false);
-
+    let consul_ok = state.nk.consul().health().await.is_ok();
     let consul_backend = std::env::var("CONSUL_BACKEND")
         .unwrap_or_else(|_| "local".to_string());
 
@@ -273,17 +253,16 @@ async fn handle_decide(
         }
     }
 
-    // Fire-and-forget: feed decision to La Rivière (dual-write, SQLite is the fallback)
+    // Fire-and-forget: feed decision to La Rivière via SDK
     {
         let content = format!(
             "Decide::{} @ {} — {} (J={:.2}, doubt={:.2}, det={:.2}, safety={is_safety_critical})",
             action, req.event.camera_id, req.event.behavior,
             triad.judgement, triad.doubt, triad.determination,
         );
-        let url   = state.fortress_url.clone();
-        let token = state.fortress_api_token.clone();
+        let nk = state.nk.clone();
         tokio::spawn(async move {
-            nuclear_eye::riviere::post_event("nuclear-eye", "camera", &content, &url, &token).await;
+            nuclear_eye::riviere::post_event("nuclear-eye", "camera", &content, &nk).await;
         });
     }
 

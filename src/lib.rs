@@ -1,4 +1,5 @@
 pub mod consul;
+pub mod face_embedding;
 pub mod guard;
 pub mod house;
 pub mod memory;

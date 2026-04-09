@@ -31,6 +31,9 @@ async fn main() -> Result<()> {
     let target_url = cfg.vision.target_url.clone();
     let tick = Duration::from_millis(cfg.vision.tick_ms);
     let camera_id = cfg.vision.default_camera_id.clone();
+    let allow_synthetic = std::env::var("VISION_ALLOW_SYNTHETIC")
+        .map(|v| matches!(v.to_ascii_lowercase().as_str(), "1" | "true" | "yes"))
+        .unwrap_or(false);
 
     let memory_path = {
         let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
@@ -62,8 +65,10 @@ async fn main() -> Result<()> {
 
     if let Some(ref snap) = snapshot_url {
         info!("vision_agent.mode=real snapshot_url={snap} target_url={target_url} camera_id={camera_id}");
+    } else if allow_synthetic {
+        warn!("vision_agent.mode=synthetic target_url={target_url} camera_id={camera_id} VISION_ALLOW_SYNTHETIC=true");
     } else {
-        info!("vision_agent.mode=synthetic target_url={target_url} camera_id={camera_id}");
+        error!("vision_agent has no snapshot source configured; synthetic mode is disabled");
     }
 
     let mut index: u64 = 0;
@@ -73,12 +78,17 @@ async fn main() -> Result<()> {
             (Some(snap_url), Some(vlm_url)) => {
                 capture_and_analyze(&client, snap_url, vlm_url, &camera_id)
                     .await
-                    .unwrap_or_else(|| {
-                        warn!("capture_and_analyze failed — falling back to synthetic event");
-                        build_event(index, &camera_id)
-                    })
             }
-            _ => build_event(index, &camera_id),
+            _ if allow_synthetic => Some(build_event(index, &camera_id)),
+            _ => {
+                warn!("vision_agent degraded: missing snapshot_url or fastvlm_url; skipping cycle");
+                None
+            }
+        };
+
+        let Some(event) = event else {
+            sleep(tick).await;
+            continue;
         };
 
         let sent = send_with_retry(&client, &target_url, &event, MAX_RETRIES).await;
@@ -167,9 +177,9 @@ fn build_event(index: u64, camera_id: &str) -> VisionEvent {
         hands_visible: if index % 2 == 0 { 2 } else { 1 },
         object_held: if index % 7 == 0 { Some("unknown_object".into()) } else { None },
         extra_tags: if index % 4 == 0 {
-            vec!["repeat_pass".into(), "attention_house".into()]
+            vec!["repeat_pass".into(), "attention_house".into(), "synthetic".into()]
         } else {
-            vec!["normal_motion".into()]
+            vec!["normal_motion".into(), "synthetic".into()]
         },
         vlm_caption: None,
     }
