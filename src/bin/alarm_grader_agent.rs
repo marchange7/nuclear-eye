@@ -39,12 +39,25 @@ enum WatchEvent {
         synthesis: String,
         confidence: f64,
     },
-    /// O6: pedestrian count + position snapshot from vision pipeline.
+    /// O6 / scout: pedestrian count + optional per-pedestrian detail from nuclear-scout.
+    /// nuclear-watch decodes: source, distance_m, phone_flag, collision_eta_s.
     Pedestrian {
         ts: u64,
         camera_id: String,
         count: u32,
         positions: Vec<serde_json::Value>,
+        /// Set when the event originates from nuclear-scout (camera_id starts with "scout:")
+        #[serde(skip_serializing_if = "Option::is_none")]
+        source: Option<String>,
+        /// Closest pedestrian distance in metres (from scout sensor data)
+        #[serde(skip_serializing_if = "Option::is_none")]
+        distance_m: Option<f64>,
+        /// True when the closest pedestrian is phone-distracted
+        #[serde(skip_serializing_if = "Option::is_none")]
+        phone_flag: Option<bool>,
+        /// Time-to-collision in seconds for the closest pedestrian
+        #[serde(skip_serializing_if = "Option::is_none")]
+        collision_eta_s: Option<f64>,
     },
     /// O6: scene summary with detected objects from VLM caption.
     Vision {
@@ -150,6 +163,7 @@ async fn main() -> Result<()> {
         .route("/sensor/camera", post(handle_camera_frame))
         .route("/summary", get(summary))
         .route("/ws", get(ws_handler))
+        .route("/health", get(alarm_health))
         .with_state(state);
 
     // Background: health check every 30s via SDK
@@ -373,13 +387,26 @@ async fn process_event(
         let _ = state.watch_tx.send(json);
     }
 
-    // 2b. Pedestrian event (O6) — emitted when at least one person detected
+    // 2b. Pedestrian event (O6 / scout) — emitted when at least one person detected.
+    // For scout-origin events (camera_id = "scout:<device>") we surface per-pedestrian
+    // detail fields that nuclear-watch decodes: source, distance_m, phone_flag, collision_eta_s.
     if event.person_detected {
+        let is_scout = event.camera_id.starts_with("scout:");
+        // Extract scout-specific fields from extra_tags and event metadata.
+        // object_held == Some("phone") is the phone-distracted signal from iphone_sensor_agent.
+        let phone_flag = if is_scout { Some(event.object_held.as_deref() == Some("phone")) } else { None };
+        // distance_m and collision_eta_s are not stored in VisionEvent directly; they are
+        // encoded in the behavior string and risk_score by iphone_to_vision_events(). We
+        // surface what we have: None for fields without a canonical source in VisionEvent.
         if let Ok(json) = serde_json::to_string(&WatchEvent::Pedestrian {
             ts: event.timestamp_ms,
             camera_id: event.camera_id.clone(),
             count: 1,
             positions: vec![],
+            source: if is_scout { Some(event.camera_id.clone()) } else { None },
+            distance_m: None,
+            phone_flag,
+            collision_eta_s: None,
         }) {
             let _ = state.watch_tx.send(json);
         }
@@ -482,6 +509,11 @@ async fn process_event(
 async fn summary(State(state): State<AppState>) -> Json<AlarmSummary> {
     let grader = state.grader.lock().await;
     Json(grader.summary())
+}
+
+/// GET /health — nuclear-watch polls this to verify the alarm grader / WebSocket host is alive.
+async fn alarm_health() -> (axum::http::StatusCode, Json<serde_json::Value>) {
+    (axum::http::StatusCode::OK, Json(serde_json::json!({ "ok": true, "service": "alarm_grader_agent" })))
 }
 
 /// Route a question through penny-brain via nuclear-sdk.

@@ -1,5 +1,5 @@
 use anyhow::{Context, Result};
-use axum::{extract::State, http::StatusCode, routing::post, Json, Router};
+use axum::{extract::State, http::StatusCode, routing::{get, post}, Json, Router};
 use nuclear_eye::{now_ms, IPhoneSensorData, PedestrianSummary, SecurityConfig, VisionEvent};
 use nuclear_eye::memory::SecurityMemory;
 use reqwest::Client;
@@ -73,6 +73,7 @@ async fn main() -> Result<()> {
 
     let app = Router::new()
         .route("/sensor/iphone", post(handle_iphone_sensor))
+        .route("/health", get(health))
         .with_state(state);
 
     let listener = tokio::net::TcpListener::bind(&bind).await?;
@@ -105,6 +106,11 @@ async fn handle_iphone_sensor(
     }
 
     (StatusCode::OK, Json(IngestResponse { accepted, skipped: total - accepted - buffered, buffered }))
+}
+
+/// GET /health — nuclear-watch uses this to verify the scout ingest agent is alive.
+async fn health() -> (StatusCode, Json<serde_json::Value>) {
+    (StatusCode::OK, Json(serde_json::json!({ "ok": true, "service": "iphone_sensor_agent" })))
 }
 
 async fn send_with_retry(client: &Client, url: &str, event: &VisionEvent, max_retries: u32) -> bool {
