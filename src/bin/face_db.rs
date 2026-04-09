@@ -7,12 +7,22 @@ use std::sync::Arc;
 use tokio::sync::Mutex;
 use tracing::info;
 
+// ── Code truth note ───────────────────────────────────────────────────
+//
+// face_db is an IDENTITY HINT LOOKUP, not biometric face recognition.
+// Search matches text words against the `embedding_hint` field using SQL LIKE.
+// There is no image embedding, no cosine similarity, no neural face matching.
+//
+// Real biometric face recognition (ArcFace/FaceNet CoreML embeddings → cosine
+// similarity) is Track O4 in Plan OS v4. Until then this is text lookup only.
+//
 // ── Search types ──────────────────────────────────────────────────────
 
 #[derive(Debug, Deserialize)]
 struct SearchRequest {
     /// Free-text query matched against embedding_hint with SQL LIKE.
     /// Words are split and each must appear somewhere in embedding_hint.
+    /// NOTE: This is text matching, NOT biometric recognition. See Track O4.
     query: String,
     /// Max results (default 5).
     #[serde(default = "default_limit")]

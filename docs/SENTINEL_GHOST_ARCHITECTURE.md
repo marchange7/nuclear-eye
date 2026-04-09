@@ -2,7 +2,15 @@
 
 **Version:** 1.0  
 **Date:** 2026-03-27  
-**Status:** Canonical — decision flow locked
+**Status:** DESIGN DOC — describes intended architecture, not current implementation
+
+> **Code Truth (2026-04-09):**
+> - `face_db` today = **identity hint lookup** (text-based semantic search on `embedding_hint`).
+>   NOT biometric face recognition. Real face embeddings (ArcFace/FaceNet CoreML) are Track O4.
+> - `reverse_img`, `osint_social`, Ghost Council = **not yet built**.
+> - `vision_agent` FastVLM caption path = **placeholder tokenizer** — returns "Scene captured" fallback.
+>   Full tokenizer integration is Track O5.
+> - The decision pipeline below is the **target state**, not the current state.
 
 ---
 
