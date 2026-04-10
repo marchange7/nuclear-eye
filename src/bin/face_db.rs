@@ -1,5 +1,7 @@
+// ArcFace-only identity. No text hint fallback.
+
 use anyhow::{Context, Result};
-use axum::{extract::{Path, State}, routing::{get, post}, Json, Router};
+use axum::{extract::{Path, State}, http::StatusCode, routing::{get, post}, Json, Router};
 use nuclear_eye::{ensure_parent_dir, face_embedding, SecurityConfig};
 use rusqlite::{params, Connection};
 use serde::{Deserialize, Serialize};
@@ -9,31 +11,20 @@ use tracing::info;
 
 // ── Code truth note ───────────────────────────────────────────────────
 //
-// face_db now supports two search modes (Track O4):
+// face_db uses ArcFace-only biometric identity (Track O4 / Z10):
 //
-// 1. TEXT SEARCH (backward compat) — POST /faces/search
-//    Matches free-text query words against `embedding_hint` using SQL LIKE.
-//    Used when no image is available (e.g., VLM caption lookup).
-//
-// 2. BIOMETRIC SEARCH (O4) — POST /faces/search-by-image
+// POST /faces/search-by-image — canonical identity lookup
 //    Input: base64 image → ArcFace sidecar → 512-dim embedding →
 //    cosine similarity against stored embeddings → ranked results.
-//    Requires face_embedding_service.py running at FACE_EMBED_URL (:5555).
+//    Requires face_embedding_service.py running at ARCFACE_URL (:5555).
+//    If sidecar unreachable or score below threshold → returns empty / "unknown".
 //
-// POST /faces/embed — extract and return embedding from a base64 image.
+// POST /faces/embed  — extract and store embedding from a base64 image.
+//
+// POST /faces/search — REMOVED. Text hint / SQL LIKE identity is gone.
+//    Returns 410 Gone. Callers must migrate to /faces/search-by-image.
 //
 // ── Search types ──────────────────────────────────────────────────────
-
-#[derive(Debug, Deserialize)]
-struct SearchRequest {
-    /// Free-text query matched against embedding_hint with SQL LIKE.
-    /// Words are split and each must appear somewhere in embedding_hint.
-    /// NOTE: This is text matching, NOT biometric recognition. See Track O4.
-    query: String,
-    /// Max results (default 5).
-    #[serde(default = "default_limit")]
-    limit: usize,
-}
 
 fn default_limit() -> usize { 5 }
 
@@ -59,15 +50,6 @@ struct EmbedRequest {
     image_b64: String,
     /// When set, store the embedding for this face name in the DB.
     face_name: Option<String>,
-}
-
-#[derive(Debug, Serialize)]
-struct SearchResult {
-    name: String,
-    embedding_hint: String,
-    authorized: bool,
-    /// Rough match score: fraction of query words found in embedding_hint (0.0–1.0).
-    score: f64,
 }
 
 /// Result from biometric image search (O4).
@@ -140,11 +122,17 @@ async fn main() -> Result<()> {
 
     let state = AppState { conn: Arc::new(Mutex::new(conn)), http };
     let app = Router::new()
+        // Q4: Lucky7 health probe
+        .route("/health", get(|| async { axum::Json(serde_json::json!({"status":"ok","service":"face_db"})) }))
         .route("/faces", get(list_faces).post(add_face))
-        .route("/faces/search", post(search_faces))
+        // Z10: text-hint search removed — ArcFace-only identity. Use /faces/search-by-image.
+        .route("/faces/search", post(search_faces_removed))
         .route("/faces/embed", post(embed_face))
         .route("/faces/search-by-image", post(search_by_image))
         .route("/faces/:name", get(find_face))
+        // T9: GDPR retention endpoints
+        .route("/faces/purge", post(purge_stale_faces))
+        .route("/faces/gdpr-export", get(gdpr_export_faces))
         .with_state(state);
 
     let listener = tokio::net::TcpListener::bind(&cfg.app.bind_face_db).await?;
@@ -154,6 +142,7 @@ async fn main() -> Result<()> {
 }
 
 fn init_db(conn: &Connection) -> Result<()> {
+    // Base schema
     conn.execute_batch(
         "CREATE TABLE IF NOT EXISTS faces (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -171,7 +160,31 @@ fn init_db(conn: &Connection) -> Result<()> {
             updated_at INTEGER NOT NULL DEFAULT (strftime('%s','now'))
         );",
     )?;
+
+    // T9: GDPR retention migration — add created_at and last_matched_at columns
+    // (idempotent: ADD COLUMN is a no-op if the column already exists in SQLite 3.37+,
+    //  and we swallow the "duplicate column" error on older versions)
+    for sql in [
+        "ALTER TABLE faces ADD COLUMN created_at INTEGER NOT NULL DEFAULT (strftime('%s','now'))",
+        "ALTER TABLE faces ADD COLUMN last_matched_at INTEGER",
+    ] {
+        match conn.execute_batch(sql) {
+            Ok(_) => {}
+            Err(e) if e.to_string().contains("duplicate column") => {}
+            Err(e) => tracing::warn!(error = %e, "face_db migration warning (non-fatal)"),
+        }
+    }
     Ok(())
+}
+
+/// T9: Default face retention period in days (30 days; override with FACE_RETENTION_DAYS env var).
+const DEFAULT_RETENTION_DAYS: i64 = 30;
+
+fn face_retention_days() -> i64 {
+    std::env::var("FACE_RETENTION_DAYS")
+        .ok()
+        .and_then(|v| v.parse::<i64>().ok())
+        .unwrap_or(DEFAULT_RETENTION_DAYS)
 }
 
 async fn list_faces(State(state): State<AppState>) -> Json<Vec<FaceRecord>> {
@@ -211,74 +224,105 @@ async fn find_face(Path(name): Path<String>, State(state): State<AppState>) -> J
 
 async fn add_face(State(state): State<AppState>, Json(input): Json<FaceRecord>) -> Json<serde_json::Value> {
     let conn = state.conn.lock().await;
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs() as i64;
     let changed = conn
         .execute(
-            "INSERT INTO faces(name, embedding_hint, authorized) VALUES(?1, ?2, ?3)
-             ON CONFLICT(name) DO UPDATE SET embedding_hint = excluded.embedding_hint, authorized = excluded.authorized",
-            params![input.name, input.embedding_hint, i64::from(input.authorized)],
+            "INSERT INTO faces(name, embedding_hint, authorized, created_at, last_matched_at)
+             VALUES(?1, ?2, ?3, ?4, ?4)
+             ON CONFLICT(name) DO UPDATE SET
+               embedding_hint   = excluded.embedding_hint,
+               authorized       = excluded.authorized,
+               last_matched_at  = ?4",
+            params![input.name, input.embedding_hint, i64::from(input.authorized), now],
         )
         .unwrap_or(0);
     Json(serde_json::json!({"upserted": changed > 0}))
 }
 
-/// Search faces by free-text query matched against `embedding_hint`.
+// ── T9: GDPR retention endpoints ────────────────────────────────────────────
+
+/// T9: Purge faces that have not been matched in FACE_RETENTION_DAYS days.
+/// Removes both the face record and any associated embedding (via ON DELETE CASCADE).
 ///
-/// Each word in `query` is checked against the lowercased embedding_hint.
-/// Score = fraction of words that match (0.0–1.0).  Results above 0 are
-/// returned sorted by score descending, up to `limit`.
-///
-/// Used by nuclear-scout to identify pedestrians via VLM captions.
-async fn search_faces(
-    State(state): State<AppState>,
-    Json(req): Json<SearchRequest>,
-) -> Json<Vec<SearchResult>> {
+/// Safe to call from a cron job or Lucky7 maintenance window.
+/// Returns the number of faces deleted.
+async fn purge_stale_faces(State(state): State<AppState>) -> Json<serde_json::Value> {
+    let retention = face_retention_days();
+    let cutoff = (std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs() as i64)
+        - retention * 86_400;
+
+    let conn = state.conn.lock().await;
+    // Delete faces where last_matched_at is NULL (never matched) and older than cutoff,
+    // OR where last_matched_at < cutoff.
+    let deleted = conn
+        .execute(
+            "DELETE FROM faces WHERE (last_matched_at IS NULL AND created_at < ?1) OR last_matched_at < ?1",
+            params![cutoff],
+        )
+        .unwrap_or(0);
+
+    tracing::info!(deleted, retention_days = retention, "T9: purged stale face records");
+    Json(serde_json::json!({
+        "deleted": deleted,
+        "retention_days": retention,
+    }))
+}
+
+/// T9: GDPR data export — returns all face records as JSON (NO biometric embeddings).
+/// Embeddings are biometric PII and must never be exported to untrusted consumers.
+/// Returns metadata only: name, hint, authorized, created_at, last_matched_at.
+async fn gdpr_export_faces(State(state): State<AppState>) -> Json<serde_json::Value> {
     let conn = state.conn.lock().await;
     let mut stmt = match conn.prepare(
-        "SELECT name, embedding_hint, authorized FROM faces ORDER BY name",
+        "SELECT name, embedding_hint, authorized, created_at, last_matched_at FROM faces ORDER BY name",
     ) {
         Ok(s) => s,
-        Err(_) => return Json(vec![]),
+        Err(e) => return Json(serde_json::json!({"error": e.to_string()})),
     };
 
-    let words: Vec<String> = req.query
-        .split_whitespace()
-        .map(|w| w.to_ascii_lowercase())
-        .filter(|w| w.len() >= 2)
-        .collect();
-
-    if words.is_empty() {
-        return Json(vec![]);
-    }
-
-    let all: Vec<(String, String, bool)> = stmt
+    let rows: Vec<serde_json::Value> = stmt
         .query_map([], |row| {
-            Ok((
-                row.get::<_, String>(0)?,
-                row.get::<_, String>(1)?,
-                row.get::<_, i64>(2)? != 0,
-            ))
+            Ok(serde_json::json!({
+                "name":             row.get::<_, String>(0)?,
+                "embedding_hint":   row.get::<_, String>(1)?,
+                "authorized":       row.get::<_, i64>(2)? != 0,
+                "created_at":       row.get::<_, Option<i64>>(3)?,
+                "last_matched_at":  row.get::<_, Option<i64>>(4)?,
+            }))
         })
-        .unwrap()
+        .unwrap_or_else(|_| Box::new(std::iter::empty()))
         .filter_map(|r| r.ok())
         .collect();
 
-    let mut results: Vec<SearchResult> = all
-        .into_iter()
-        .filter_map(|(name, hint, authorized)| {
-            let hint_lower = hint.to_ascii_lowercase();
-            let matches = words.iter().filter(|w| hint_lower.contains(w.as_str())).count();
-            if matches == 0 {
-                return None;
-            }
-            let score = matches as f64 / words.len() as f64;
-            Some(SearchResult { name, embedding_hint: hint, authorized, score })
-        })
-        .collect();
+    let total = rows.len();
+    Json(serde_json::json!({
+        "faces": rows,
+        "total": total,
+        "note": "Biometric embeddings excluded. Names are identity hints only — not confirmed identities.",
+        "retention_days": face_retention_days(),
+    }))
+}
 
-    results.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal));
-    results.truncate(req.limit);
-
-    Json(results)
+/// Z10: POST /faces/search — tombstone handler.
+///
+/// Text-hint / SQL-LIKE identity search has been removed (Z10).
+/// All face lookups must use biometric ArcFace matching: POST /faces/search-by-image.
+/// If ArcFace score is below threshold → "unknown" is returned, never a text guess.
+async fn search_faces_removed() -> (StatusCode, Json<serde_json::Value>) {
+    tracing::warn!("POST /faces/search called — endpoint removed (Z10). Use /faces/search-by-image.");
+    (
+        StatusCode::GONE,
+        Json(serde_json::json!({
+            "error": "Text-hint face search removed (Z10). Use POST /faces/search-by-image with ArcFace biometric matching.",
+            "migrate_to": "/faces/search-by-image",
+        })),
+    )
 }
 
 // ── O4: Biometric endpoints ───────────────────────────────────────────────────
@@ -406,6 +450,22 @@ async fn search_by_image(
 
     results.sort_by(|a, b| b.similarity.partial_cmp(&a.similarity).unwrap_or(std::cmp::Ordering::Equal));
     results.truncate(req.limit);
+
+    // T9: Update last_matched_at for faces above the likely-match threshold (biometric retention tracking).
+    // Fire-and-forget: if the update fails, the search result is still returned.
+    if results.iter().any(|r| r.likely_match) {
+        let conn2 = state.conn.lock().await;
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs() as i64;
+        for r in results.iter().filter(|r| r.likely_match) {
+            let _ = conn2.execute(
+                "UPDATE faces SET last_matched_at = ?1 WHERE name = ?2",
+                params![now, r.name],
+            );
+        }
+    }
 
     Json(results)
 }

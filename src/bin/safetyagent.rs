@@ -57,7 +57,10 @@ fn app_state_config() -> String {
         .ok()
         .and_then(|_| SecurityConfig::load().ok())
         .map(|c| c.app.bind_safetyagent)
-        .unwrap_or_else(|| "0.0.0.0:8081".to_string())
+        .unwrap_or_else(|| {
+            let host = std::env::var("BIND_HOST").unwrap_or_else(|_| "127.0.0.1".to_string());
+            format!("{host}:8081")
+        })
 }
 
 async fn health() -> &'static str {

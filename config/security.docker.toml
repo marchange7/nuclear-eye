@@ -1,4 +1,7 @@
 [app]
+# Docker: 0.0.0.0 is required for container port-mapping (Docker NAT layer).
+# For bare-metal / systemd deployment, use BIND_HOST=127.0.0.1 (the default)
+# or set bind_alarm_grader/bind_safetyagent/bind_face_db to 127.0.0.1 directly.
 bind_alarm_grader = "0.0.0.0:8780"
 bind_safetyagent = "0.0.0.0:8081"
 bind_face_db = "0.0.0.0:8087"

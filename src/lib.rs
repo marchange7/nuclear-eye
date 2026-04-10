@@ -1,3 +1,4 @@
+pub mod audit;
 pub mod consul;
 pub mod face_embedding;
 pub mod guard;
@@ -239,7 +240,10 @@ pub struct DecisionConfig {
 impl Default for DecisionConfig {
     fn default() -> Self {
         Self {
-            bind: "0.0.0.0:8085".into(),
+            bind: format!(
+                "{}:8085",
+                std::env::var("BIND_HOST").unwrap_or_else(|_| "127.0.0.1".to_string())
+            ),
             safety_risk_threshold: 0.5,
         }
     }
@@ -258,7 +262,10 @@ pub struct AurelieBridgeConfig {
 impl Default for AurelieBridgeConfig {
     fn default() -> Self {
         Self {
-            bind: "0.0.0.0:8086".into(),
+            bind: format!(
+                "{}:8086",
+                std::env::var("BIND_HOST").unwrap_or_else(|_| "127.0.0.1".to_string())
+            ),
             aurelie_chat_url: "http://127.0.0.1:8090/api/safety".into(),
             request_timeout_secs: 30,
             telegram_on_alarm: true,

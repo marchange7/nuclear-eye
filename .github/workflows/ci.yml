@@ -1,0 +1,66 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+# nuclear-eye has two layers:
+#   - Python service (main.py, camera_server.py, face_embedding_service.py, perceive_service.py)
+#   - Rust library + binaries (path deps on nuclear-sdk, nuclear-consul, etc.)
+#
+# Rust build requires all sibling repos — run `cargo test` on b450, not here.
+# This workflow covers Python lint only. Integration tests run on b450.
+
+jobs:
+  python-lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install ruff
+        run: pip install ruff
+
+      - name: ruff check
+        run: ruff check .
+
+      - name: ruff format check
+        run: ruff format --check .
+
+  python-smoke:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install minimal runtime deps
+        run: pip install fastapi uvicorn httpx pillow toml numpy
+
+      - name: Syntax check — importable without heavy deps
+        run: |
+          python -c "
+          import ast, pathlib, sys
+          errors = []
+          for f in pathlib.Path('.').glob('**/*.py'):
+              if '.git' in f.parts or 'target' in f.parts:
+                  continue
+              try:
+                  ast.parse(f.read_text())
+              except SyntaxError as e:
+                  errors.append(f'{f}: {e}')
+          if errors:
+              for e in errors: print(e)
+              sys.exit(1)
+          print(f'All .py files parse clean')
+          "
+        env:
+          NUCLEAR_WRAPPER_URL: ""
+          FASTVLM_DISABLED: "true"
+          NUCLEAR_ENV: test

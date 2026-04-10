@@ -2,6 +2,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::Result;
+use chrono::Utc;
 use axum::{
     extract::{State, ws::{Message, WebSocket, WebSocketUpgrade}},
     routing::{get, post},
@@ -93,6 +94,13 @@ struct AppState {
     alert_lang: String,
     /// Shared HTTP client for La Rivière domain event POSTs (O7).
     http: reqwest::Client,
+    /// chain-comms base URL for SMS/Signal High-alarm notifications (optional).
+    /// Set COMMS_URL=http://127.0.0.1:9100 to enable.
+    comms_url: Option<String>,
+    /// Bearer token for chain-comms API authentication.
+    comms_api_token: Option<String>,
+    /// Recipient phone/Signal number for High-alarm notifications (E.164).
+    comms_alert_recipient: Option<String>,
 }
 
 #[tokio::main]
@@ -147,6 +155,10 @@ async fn main() -> Result<()> {
         .build()
         .expect("build HTTP client");
 
+    let comms_url = std::env::var("COMMS_URL").ok().filter(|s| !s.is_empty());
+    let comms_api_token = std::env::var("COMMS_API_TOKEN").ok().filter(|s| !s.is_empty() && !s.starts_with("TODO"));
+    let comms_alert_recipient = std::env::var("COMMS_ALERT_RECIPIENT").ok().filter(|s| s.starts_with('+'));
+
     let state = AppState {
         grader: Arc::new(Mutex::new(grader)),
         consul,
@@ -156,6 +168,9 @@ async fn main() -> Result<()> {
         watch_tx,
         alert_lang,
         http,
+        comms_url,
+        comms_api_token,
+        comms_alert_recipient,
     };
 
     let app = Router::new()
@@ -298,6 +313,22 @@ async fn process_event(
         alarm.note.push_str(extra);
     }
 
+    // ── Q5: Audit log — append verdict record before any fan-out ────────────────
+    //
+    // Synchronous append to AUDIT_LOG_PATH (default /var/log/nuclear-eye/audit.jsonl).
+    // Spawned in a blocking task so we don't block the Tokio thread on file I/O.
+    {
+        let cam_id   = event.camera_id.clone();
+        let behavior = event.behavior.clone();
+        let verdict  = alarm.level.to_string();
+        let conf     = alarm.danger_score as f32;
+        let triad_a  = AffectTriad::from_alarm_event(&alarm);
+        let action_s = decide(&triad_a, alarm.level == AlarmLevel::High).to_string();
+        tokio::task::spawn_blocking(move || {
+            nuclear_eye::audit::log_decision(&cam_id, &behavior, &verdict, conf, &action_s);
+        });
+    }
+
     // ── O7 / Q5: La Rivière FIRST (canonical source of truth) ────────────────
     //
     // Fan-out order: La Rivière → WebSocket → Fortress mesh → Telegram
@@ -428,9 +459,116 @@ async fn process_event(
         }
     }
 
-    // ── 3. Fortress mesh publish (existing, non-blocking) ─────────────────────
-    // TODO: migrate to nk.fortress().ingest_security() once fortress mesh
-    //       type alignment with SecurityEvent is confirmed.
+    // ── Q8: nuclear-chain dual-publish ────────────────────────────────────────────
+    //
+    // When CHAIN_ENABLED=true and NUCLEAR_CHAIN_URL is set, POST the alarm verdict
+    // to nuclear-chain /v1/events in addition to the existing WebSocket broadcast.
+    // Dual-publish during transition — existing WS path is always active.
+    // Fire-and-forget: chain publish never delays ingest or blocks the caller.
+    {
+        let chain_enabled = std::env::var("CHAIN_ENABLED")
+            .map(|v| v.to_lowercase() == "true")
+            .unwrap_or(false);
+        let chain_url = std::env::var("NUCLEAR_CHAIN_URL").ok().filter(|s| !s.is_empty());
+
+        if chain_enabled {
+            if let Some(chain_url) = chain_url {
+                let http = state.http.clone();
+                let cam_id = event.camera_id.clone();
+                let level = alarm.level.to_string();
+                let score = alarm.danger_score;
+                let reason = alarm.note.clone();
+                let caption = alarm.vlm_caption.clone();
+                let ts = alarm.timestamp_ms;
+                let chain_token = std::env::var("NUCLEAR_CHAIN_TOKEN").ok()
+                    .filter(|s| !s.is_empty());
+
+                tokio::spawn(async move {
+                    let payload = serde_json::json!({
+                        "type": "sentinelle.alarm.verdict",
+                        "camera_id": cam_id,
+                        "level": level,
+                        "score": score,
+                        "reason": reason,
+                        "caption": caption,
+                        "ts": ts,
+                    });
+                    let mut req = http
+                        .post(format!("{chain_url}/v1/events"))
+                        .header("X-Chain-Service", "alarm-grader-agent")
+                        .header("X-Chain-Path", "/alerts")
+                        .header("X-Chain-Target", "nuclear-watch")
+                        .json(&payload)
+                        .timeout(std::time::Duration::from_secs(2));
+                    if let Some(token) = chain_token {
+                        req = req.bearer_auth(token);
+                    }
+                    match req.send().await {
+                        Ok(r) if r.status().is_success() => {
+                            info!(camera_id = %cam_id, "Q8: alarm verdict published to nuclear-chain");
+                        }
+                        Ok(r) => {
+                            warn!(status = %r.status(), camera_id = %cam_id, "Q8: nuclear-chain /v1/events non-success (non-blocking)");
+                        }
+                        Err(e) => {
+                            warn!(error = %e, "Q8: nuclear-chain unreachable — chain publish skipped (non-blocking)");
+                        }
+                    }
+                });
+            } else {
+                tracing::debug!("Q8: CHAIN_ENABLED=true but NUCLEAR_CHAIN_URL not set — chain publish skipped");
+            }
+        }
+    }
+
+    // ── 3. Fortress mesh publish ────────────────────────────────────────────────
+    //
+    // 3a. Q2: Enforced sentinelle.alarm.verdict stream event (always attempted).
+    //     POSTs to FORTRESS_URL/v1/stream regardless of mesh_enabled flag so that
+    //     La Rivière always receives the canonical verdict record.
+    //     FORTRESS_URL and FORTRESS_API_TOKEN are read at event time (not cached at
+    //     startup) so hot env-var changes in Docker / systemd take effect immediately.
+    {
+        let http = state.http.clone();
+        let cam_id = event.camera_id.clone();
+        let verdict = alarm.level.to_string();
+        let confidence = alarm.danger_score as f32;
+        let ts = chrono::Utc::now().to_rfc3339();
+        tokio::spawn(async move {
+            let fortress_url = std::env::var("FORTRESS_URL")
+                .unwrap_or_else(|_| "http://127.0.0.1:7700".to_string());
+            let api_token = std::env::var("FORTRESS_API_TOKEN")
+                .unwrap_or_default();
+            let payload = serde_json::json!({
+                "type": "sentinelle.alarm.verdict",
+                "camera_id": cam_id,
+                "verdict": verdict,
+                "confidence": confidence,
+                "ts": ts,
+            });
+            let result = http
+                .post(format!("{fortress_url}/v1/stream"))
+                .bearer_auth(&api_token)
+                .json(&payload)
+                .timeout(std::time::Duration::from_millis(500))
+                .send()
+                .await;
+            match result {
+                Ok(r) if r.status().is_success() => {
+                    tracing::debug!(camera_id = %cam_id, "sentinelle.alarm.verdict published to Fortress stream");
+                }
+                Ok(r) => {
+                    warn!(status = %r.status(), camera_id = %cam_id, "Fortress /v1/stream non-success (non-blocking)");
+                }
+                Err(e) => {
+                    warn!(error = %e, "Fortress /v1/stream unreachable — verdict not published (non-blocking)");
+                }
+            }
+        });
+    }
+
+    // 3b. Legacy Fortress mesh publish (deep SecurityEvent shape).
+    //     Retained for backward compat; can be removed once 3a covers all consumers.
     if state.fortress_enabled {
         let triad = AffectTriad::from_alarm_event(&alarm);
         let decision = alarm.level.to_string();
@@ -469,6 +607,79 @@ async fn process_event(
     } else {
         None
     };
+
+    // ── 5. chain-comms High-alarm notification (SMS and/or Signal) ──────────────
+    // Fires only on High alarms when COMMS_URL + COMMS_ALERT_RECIPIENT are set.
+    // Uses SMS if Twilio is configured on chain-comms, otherwise falls through to Signal.
+    // Non-blocking: a slow/unreachable chain-comms never delays the ingest response.
+    if alarm.level == AlarmLevel::High {
+        if let (Some(comms_url), Some(recipient)) =
+            (&state.comms_url, &state.comms_alert_recipient)
+        {
+            let http = state.http.clone();
+            let comms_url = comms_url.clone();
+            let recipient = recipient.clone();
+            let api_token = state.comms_api_token.clone().unwrap_or_default();
+            let location = event.camera_id.replace('_', " ");
+            let score = alarm.danger_score;
+            let note = alarm.note.clone();
+            let alert_lang = state.alert_lang.clone();
+
+            tokio::spawn(async move {
+                let body = match alert_lang.as_str() {
+                    "en" => format!(
+                        "NUCLEAR ALERT — High danger at {location} (score={score:.2}). {note}"
+                    ),
+                    "de" => format!(
+                        "NUCLEAR ALARM — Hohe Gefahr bei {location} (score={score:.2}). {note}"
+                    ),
+                    "es" => format!(
+                        "NUCLEAR ALERTA — Peligro alto en {location} (score={score:.2}). {note}"
+                    ),
+                    _ => format!(
+                        "NUCLEAR ALERTE — Danger élevé à {location} (score={score:.2}). {note}"
+                    ),
+                };
+
+                // Try SMS first, then Signal. Both are fire-and-forget; we log but never panic.
+                let sms_payload = serde_json::json!({ "to": recipient, "body": body });
+                let sms_result = http
+                    .post(format!("{comms_url}/sms/send"))
+                    .bearer_auth(&api_token)
+                    .json(&sms_payload)
+                    .timeout(std::time::Duration::from_secs(5))
+                    .send()
+                    .await;
+
+                match sms_result {
+                    Ok(r) if r.status().is_success() => {
+                        info!(recipient = %recipient, "High-alarm SMS sent via chain-comms");
+                    }
+                    Ok(r) => {
+                        // SMS unavailable (Twilio not configured) — try Signal fallback.
+                        let status = r.status();
+                        tracing::debug!(status = %status, "SMS unavailable, trying Signal");
+                        let sig_payload = serde_json::json!({ "recipient": recipient, "message": body });
+                        let sig_result = http
+                            .post(format!("{comms_url}/signal/send"))
+                            .bearer_auth(&api_token)
+                            .json(&sig_payload)
+                            .timeout(std::time::Duration::from_secs(5))
+                            .send()
+                            .await;
+                        match sig_result {
+                            Ok(r) if r.status().is_success() => {
+                                info!(recipient = %recipient, "High-alarm Signal message sent via chain-comms");
+                            }
+                            Ok(r) => warn!(status = %r.status(), "Signal send failed via chain-comms"),
+                            Err(e) => warn!(error = %e, "chain-comms Signal send unreachable"),
+                        }
+                    }
+                    Err(e) => warn!(error = %e, "chain-comms SMS send unreachable"),
+                }
+            });
+        }
+    }
 
     // Fire-and-forget actuation (lights / buzzer / arm via MQTT)
     {
@@ -559,6 +770,69 @@ async fn handle_watch_socket(mut socket: WebSocket, mut rx: broadcast::Receiver<
                 warn!("nuclear-watch ws lagged {n} messages");
             }
         }
+    }
+}
+
+// ── Sentinelle perceptual risk scorer ────────────────────────────────────────
+
+/// Multimodal risk signal fused from face, voice, and gesture perception.
+///
+/// Produced by [`compute_perceptual_risk`] when at least 2 modalities are present.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct PerceptualRisk {
+    pub score: f32,         // 0.0–1.0
+    pub alert: bool,        // score > 0.7
+    pub face_contrib: f32,
+    pub voice_contrib: f32,
+    pub gesture_contrib: f32,
+}
+
+/// Fuse face/voice/gesture signals into a Sentinelle risk score.
+///
+/// Inputs (all optional, 0.0 if absent):
+///   face_negative:   (-valence + 1) / 2 × confidence  (from FER model)
+///   voice_agitated:  sqrt(arousal+1/2 × neg_valence+1/2) × confidence
+///   gesture_threat:  attacking=1.0, approaching=0.7, loitering=0.5, fleeing=0.4, help_needed=0.3
+///
+/// Returns None if fewer than 2 modalities are present.
+pub fn compute_perceptual_risk(
+    face_negative: Option<f32>,
+    voice_agitated: Option<f32>,
+    gesture_threat: Option<f32>,
+) -> Option<PerceptualRisk> {
+    let mut n = 0u32;
+    let fc = face_negative.map(|v| { n += 1; v }).unwrap_or(0.0);
+    let vc = voice_agitated.map(|v| { n += 1; v }).unwrap_or(0.0);
+    let gc = gesture_threat.map(|v| { n += 1; v }).unwrap_or(0.0);
+    if n < 2 { return None; }
+    let score = (0.4 * fc + 0.3 * vc + 0.3 * gc).clamp(0.0, 1.0);
+    Some(PerceptualRisk {
+        score,
+        alert: score > 0.7,
+        face_contrib:    (fc * 0.4 * 10000.0).round() / 10000.0,
+        voice_contrib:   (vc * 0.3 * 10000.0).round() / 10000.0,
+        gesture_contrib: (gc * 0.3 * 10000.0).round() / 10000.0,
+    })
+}
+
+#[cfg(test)]
+mod risk_tests {
+    use super::*;
+    #[test]
+    fn test_risk_alert_triggered() {
+        // angry face + attacking gesture should exceed 0.7
+        let risk = compute_perceptual_risk(Some(0.9), None, Some(1.0)).unwrap();
+        assert!(risk.alert, "angry+attacking should trigger alert");
+    }
+    #[test]
+    fn test_risk_normal_no_alert() {
+        let risk = compute_perceptual_risk(Some(0.1), Some(0.1), Some(0.0)).unwrap();
+        assert!(!risk.alert, "neutral face+calm voice should not alert");
+    }
+    #[test]
+    fn test_risk_single_modality_returns_none() {
+        let risk = compute_perceptual_risk(Some(0.9), None, None);
+        assert!(risk.is_none(), "single modality should return None");
     }
 }
 

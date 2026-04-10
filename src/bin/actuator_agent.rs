@@ -2,7 +2,7 @@
 /// for physical outputs (lights, buzzers, servo arms).
 ///
 /// Env vars:
-///   ACTUATOR_BIND         bind address          (default: 0.0.0.0:8086)
+///   ACTUATOR_BIND         bind address          (default: 127.0.0.1:8086; use BIND_HOST=0.0.0.0 for Docker/Jetson)
 ///   ACTUATOR_MQTT_HOST    MQTT broker host       (default: 127.0.0.1)
 ///   ACTUATOR_MQTT_PORT    MQTT broker port       (default: 1883)
 ///   ACTUATOR_MQTT_PREFIX  topic prefix           (default: nuclear/actuator)
@@ -172,8 +172,10 @@ async fn main() -> Result<()> {
         Err(e) => tracing::warn!("nuclear-wrapper: start failed ({e}) — running unguarded"),
     }
 
-    let bind = std::env::var("ACTUATOR_BIND")
-        .unwrap_or_else(|_| "0.0.0.0:8086".to_string());
+    let bind = std::env::var("ACTUATOR_BIND").unwrap_or_else(|_| {
+        let host = std::env::var("BIND_HOST").unwrap_or_else(|_| "127.0.0.1".to_string());
+        format!("{host}:8086")
+    });
     let mqtt_host = std::env::var("ACTUATOR_MQTT_HOST")
         .unwrap_or_else(|_| "127.0.0.1".to_string());
     let mqtt_port: u16 = std::env::var("ACTUATOR_MQTT_PORT")

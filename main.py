@@ -4,6 +4,7 @@ import collections
 import io
 import logging
 import os
+import sys
 import time
 import uuid
 from contextlib import asynccontextmanager
@@ -18,8 +19,14 @@ from fastapi.responses import Response
 from PIL import Image
 from pydantic import BaseModel
 
+from src.fastvlm_onnx import fastvlm as fastvlm_onnx
+
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s — %(message)s")
 log = logging.getLogger("nuclear-camera")
+
+# Y6: Fail-closed wrapper guard — nuclear-eye refuses to run unguarded.
+WRAPPER_URL = os.getenv("NUCLEAR_WRAPPER_URL", "http://localhost:9090")
+WRAPPER_POLL_INTERVAL_SECS = 60
 
 CONFIG_PATH = os.environ.get("CAMERA_CONFIG", "cameras.toml")
 
@@ -247,6 +254,13 @@ async def describe_frame(
     fastvlm_url: str,
     client: httpx.AsyncClient,
 ) -> Optional[str]:
+    # Q7: try local ONNX first, fall back to HTTP service if unavailable
+    if fastvlm_onnx.available:
+        return await fastvlm_onnx.describe(image_bytes)
+
+    # HTTP fallback (legacy path)
+    if not fastvlm_url:
+        return "Vision unavailable — no ONNX model and no FASTVLM_URL set"
     b64 = base64.b64encode(image_bytes).decode()
     payload = {
         "image_b64": b64,
@@ -375,6 +389,11 @@ async def camera_loop(cam: dict, settings: dict) -> None:
 
     async with httpx.AsyncClient() as client:
         while True:
+            # Y6: Degraded mode — wrapper lost at runtime. Hold frame processing.
+            if _wrapper_degraded:
+                log.warning("[%s] wrapper degraded — skipping frame (Y6 fail-closed)", cam_id)
+                await asyncio.sleep(interval)
+                continue
             try:
                 frame_bytes = await grab_frame(cam, client)
                 if frame_bytes is None:
@@ -440,11 +459,64 @@ async def camera_loop(cam: dict, settings: dict) -> None:
             await asyncio.sleep(interval)
 
 
+# --- Y6: Wrapper health guard ---
+
+async def check_wrapper_health():
+    """Y6: Verify nuclear-wrapper is reachable before serving. Exits process on failure."""
+    try:
+        async with httpx.AsyncClient() as client:
+            r = await client.get(f"{WRAPPER_URL}/health", timeout=5.0)
+        if r.status_code != 200:
+            raise RuntimeError(f"wrapper returned HTTP {r.status_code}")
+        log.info("nuclear-wrapper: healthy at %s", WRAPPER_URL)
+    except Exception as e:
+        print(
+            f"FATAL: nuclear-wrapper unreachable: {e}. Refusing to start unguarded.",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
+
+# Degraded mode flag: set True when wrapper goes away at runtime.
+_wrapper_degraded = False
+
+
+async def wrapper_monitor():
+    """Y6: Periodic wrapper health check every 60s. Enters degraded mode if wrapper goes away."""
+    global _wrapper_degraded
+    while True:
+        await asyncio.sleep(WRAPPER_POLL_INTERVAL_SECS)
+        try:
+            async with httpx.AsyncClient() as client:
+                r = await client.get(f"{WRAPPER_URL}/health", timeout=5.0)
+            if r.status_code != 200:
+                raise RuntimeError(f"wrapper returned HTTP {r.status_code}")
+            if _wrapper_degraded:
+                log.info("nuclear-wrapper: recovered — resuming normal operation")
+                _wrapper_degraded = False
+        except Exception as e:
+            if not _wrapper_degraded:
+                log.critical(
+                    "CRITICAL: nuclear-wrapper lost at runtime: %s — entering degraded mode, "
+                    "new frame processing suspended", e
+                )
+            _wrapper_degraded = True
+
+
 # --- Lifespan ---
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     global config
+    await check_wrapper_health()
+
+    # Q7: load FastVLM ONNX for local inference (falls back to HTTP if unavailable)
+    await fastvlm_onnx.load()
+    if fastvlm_onnx.available:
+        log.info("FastVLM ONNX loaded — using local inference")
+    else:
+        log.info("FastVLM ONNX not available — using HTTP fallback")
+
     config = load_config()
     settings = config.get("settings", {})
     cameras = config.get("cameras", [])
@@ -472,7 +544,8 @@ async def lifespan(app: FastAPI):
 
     _tasks.append(asyncio.create_task(flush_offline_buffer(house_security_url), name="flush-buffer"))
     _tasks.append(asyncio.create_task(camera_health_monitor(), name="health-monitor"))
-    log.info("Started offline buffer flush + camera health monitor")
+    _tasks.append(asyncio.create_task(wrapper_monitor(), name="wrapper-monitor"))
+    log.info("Started offline buffer flush + camera health monitor + wrapper monitor")
 
     yield
 

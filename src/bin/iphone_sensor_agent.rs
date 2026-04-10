@@ -45,8 +45,10 @@ async fn main() -> Result<()> {
     let cfg = SecurityConfig::load()?;
     let client = Arc::new(Client::builder().build().context("failed to build HTTP client")?);
 
-    let bind = std::env::var("IPHONE_SENSOR_BIND")
-        .unwrap_or_else(|_| "0.0.0.0:8089".to_string());
+    let bind = std::env::var("IPHONE_SENSOR_BIND").unwrap_or_else(|_| {
+        let host = std::env::var("BIND_HOST").unwrap_or_else(|_| "127.0.0.1".to_string());
+        format!("{host}:8089")
+    });
     let alarm_grader_url = cfg.app.alarm_grader_url.clone();
 
     let memory_path = {

@@ -1,6 +1,40 @@
 version: "3.9"
 
+# Q3: Health checks and depends_on chain.
+# Startup order: alarm-grader → safetyagent → safety-aurelie-agent
+#                alarm-grader → face-db
+#                alarm-grader → decision-agent
+#                alarm-grader → vision-agent
+# All services have /health endpoints.  vision-agent does not bind a port so
+# its health check probes the alarm-grader it reports to instead.
+#
+# Q10 note: BIND_HOST defaults to 127.0.0.1 in bare-metal deployments.
+# Docker containers need 0.0.0.0 for port mapping — BIND_HOST is set per service below.
+
 services:
+  # Y6: nuclear-wrapper resilience sidecar — all services depend on this being healthy.
+  # NUCLEAR_WRAPPER_URL=http://nuclear-wrapper:9090 is injected into each service env.
+  nuclear-wrapper:
+    image: rust:1.78-bullseye
+    working_dir: /workspace
+    command: ["bash", "-lc", "cargo run --release -p nuclear-wrapper --bin nuclear-wrapper-sidecar"]
+    restart: unless-stopped
+    environment:
+      RUST_LOG: info
+      BIND_HOST: "0.0.0.0"
+    ports:
+      - "9090:9090"
+    mem_limit: 128m
+    cpus: 0.25
+    volumes:
+      - ./:/workspace
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9090/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
+
   alarm-grader:
     image: rust:1.78-bullseye
     working_dir: /workspace
@@ -9,12 +43,25 @@ services:
     environment:
       RUST_LOG: info
       HOUSE_SECURITY_CONFIG: /workspace/config/security.docker.toml
+      # Q10: bind on all interfaces inside the container; port-mapped by Docker.
+      BIND_HOST: "0.0.0.0"
+      # Y6: wrapper URL for fail-closed health guard
+      NUCLEAR_WRAPPER_URL: "http://nuclear-wrapper:9090"
     ports:
       - "8780:8780"
     mem_limit: 256m
     cpus: 0.75
     volumes:
       - ./:/workspace
+    depends_on:
+      nuclear-wrapper:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8780/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
 
   safetyagent:
     image: rust:1.78-bullseye
@@ -24,6 +71,8 @@ services:
     environment:
       RUST_LOG: info
       HOUSE_SECURITY_CONFIG: /workspace/config/security.docker.toml
+      BIND_HOST: "0.0.0.0"
+      NUCLEAR_WRAPPER_URL: "http://nuclear-wrapper:9090"
     ports:
       - "8081:8081"
     mem_limit: 192m
@@ -31,7 +80,16 @@ services:
     volumes:
       - ./:/workspace
     depends_on:
-      - alarm-grader
+      nuclear-wrapper:
+        condition: service_healthy
+      alarm-grader:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8081/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
 
   face-db:
     image: rust:1.78-bullseye
@@ -41,12 +99,27 @@ services:
     environment:
       RUST_LOG: info
       HOUSE_SECURITY_CONFIG: /workspace/config/security.docker.toml
+      BIND_HOST: "0.0.0.0"
+      NUCLEAR_WRAPPER_URL: "http://nuclear-wrapper:9090"
+      # Z10: ArcFace sidecar URL (canonical env name)
+      ARCFACE_URL: "http://localhost:5555"
     ports:
       - "8087:8087"
     mem_limit: 160m
     cpus: 0.35
     volumes:
       - ./:/workspace
+    depends_on:
+      nuclear-wrapper:
+        condition: service_healthy
+      alarm-grader:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8087/faces"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
 
   decision-agent:
     image: rust:1.78-bullseye
@@ -56,13 +129,26 @@ services:
     environment:
       RUST_LOG: info
       HOUSE_SECURITY_CONFIG: /workspace/config/security.docker.toml
+      # Explicit bind override so the service is reachable via Docker port mapping.
       DECISION_AGENT_BIND: "0.0.0.0:8085"
+      NUCLEAR_WRAPPER_URL: "http://nuclear-wrapper:9090"
     ports:
       - "8085:8085"
     mem_limit: 192m
     cpus: 0.50
     volumes:
       - ./:/workspace
+    depends_on:
+      nuclear-wrapper:
+        condition: service_healthy
+      alarm-grader:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8085/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
 
   safety-aurelie-agent:
     image: rust:1.78-bullseye
@@ -72,8 +158,10 @@ services:
     environment:
       RUST_LOG: info
       HOUSE_SECURITY_CONFIG: /workspace/config/security.docker.toml
+      # Explicit bind override so the service is reachable via Docker port mapping.
       SAFETY_AURELIE_BIND: "0.0.0.0:8086"
       AURELIE_CHAT_URL: "http://host.docker.internal:8090/chat"
+      NUCLEAR_WRAPPER_URL: "http://nuclear-wrapper:9090"
     ports:
       - "8086:8086"
     mem_limit: 192m
@@ -81,7 +169,16 @@ services:
     volumes:
       - ./:/workspace
     depends_on:
-      - safetyagent
+      nuclear-wrapper:
+        condition: service_healthy
+      safetyagent:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8086/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
 
   vision-agent:
     image: rust:1.78-bullseye
@@ -91,10 +188,29 @@ services:
     environment:
       RUST_LOG: info
       HOUSE_SECURITY_CONFIG: /workspace/config/security.docker.toml
+      # Q1: set CAMERA_URL to enable RTSP capture (requires opencv feature).
+      # CAMERA_URL: "rtsp://admin:password@192.168.1.100:554/stream"
+      # CAMERA_FPS: "5"
+      NUCLEAR_WRAPPER_URL: "http://nuclear-wrapper:9090"
+      # Q7: FastVLM ONNX local inference (Python nuclear-camera service)
+      FASTVLM_ONNX_PATH: ${FASTVLM_ONNX_PATH:-/data/models/fastvlm/fastvlm.onnx}
+      FASTVLM_DISABLED: ${FASTVLM_DISABLED:-false}
     mem_limit: 192m
     cpus: 0.50
     volumes:
       - ./:/workspace
       - /dev:/dev
     depends_on:
-      - safetyagent
+      nuclear-wrapper:
+        condition: service_healthy
+      alarm-grader:
+        condition: service_healthy
+    # vision-agent has no HTTP server of its own — health is inferred by whether
+    # alarm-grader is receiving events.  We probe alarm-grader's /health here as
+    # a proxy; the real liveness signal is the alarm pipeline receiving ingest events.
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://alarm-grader:8780/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 20s

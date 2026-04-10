@@ -4,56 +4,119 @@ pub struct SecurityMemory {
     conn: Connection,
 }
 
+// ── Schema versioning (Q6) ────────────────────────────────────────────────────
+//
+// Rules:
+//   - The schema_version table tracks which migrations have been applied.
+//   - Migrations are applied in order and are additive only.
+//   - Migration 1 = the original schema (alarm_history, vision_history,
+//     false_alarm_log, decision_log, event_buffer).
+//   - To add a new migration: increment CURRENT_MIGRATION and add a new arm to
+//     the `match version` block in `run_migrations()`.
+//
+const CURRENT_MIGRATION: i64 = 1;
+
+/// Ensure the schema_version table exists, then apply all pending migrations.
+///
+/// This function is idempotent and safe to call every time the DB is opened.
+pub fn run_migrations(conn: &Connection) -> Result<()> {
+    // Bootstrap the migration tracking table.
+    conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS schema_version (
+            version INTEGER NOT NULL
+        );",
+    )?;
+
+    // Read current version (0 if table is empty = fresh DB).
+    let version: i64 = conn
+        .query_row(
+            "SELECT COALESCE(MAX(version), 0) FROM schema_version",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap_or(0);
+
+    if version >= CURRENT_MIGRATION {
+        return Ok(()); // already up-to-date
+    }
+
+    // Apply migrations in sequence from (version+1) to CURRENT_MIGRATION.
+    for v in (version + 1)..=CURRENT_MIGRATION {
+        match v {
+            1 => {
+                // Migration 1 — initial schema.
+                conn.execute_batch(
+                    "CREATE TABLE IF NOT EXISTS alarm_history (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        timestamp_ms INTEGER NOT NULL,
+                        level TEXT NOT NULL,
+                        danger_score REAL,
+                        note TEXT,
+                        decision TEXT,
+                        created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+                    );
+                    CREATE TABLE IF NOT EXISTS vision_history (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        timestamp_ms INTEGER NOT NULL,
+                        behavior TEXT,
+                        risk_score REAL,
+                        person_detected INTEGER,
+                        person_name TEXT,
+                        created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+                    );
+                    CREATE TABLE IF NOT EXISTS false_alarm_log (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        alarm_id TEXT,
+                        confirmed_false INTEGER DEFAULT 0,
+                        note TEXT,
+                        created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+                    );
+                    CREATE TABLE IF NOT EXISTS decision_log (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        timestamp_ms INTEGER NOT NULL,
+                        event_id TEXT NOT NULL,
+                        camera_id TEXT NOT NULL,
+                        action TEXT NOT NULL,
+                        is_safety_critical INTEGER NOT NULL,
+                        dominant_dimension TEXT NOT NULL,
+                        consul_synthesis TEXT,
+                        consul_confidence REAL,
+                        created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+                    );
+                    -- Offline buffer: VisionEvents that failed to reach alarm_grader_agent
+                    CREATE TABLE IF NOT EXISTS event_buffer (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        event_json TEXT NOT NULL,
+                        target_url TEXT NOT NULL,
+                        queued_at INTEGER NOT NULL,
+                        attempts INTEGER DEFAULT 0
+                    );",
+                )?;
+            }
+            // Add future migrations here as new `v => { ... }` arms.
+            // Example (migration 2 — add face_cache table):
+            //   2 => { conn.execute_batch("ALTER TABLE alarm_history ADD COLUMN source TEXT;")?; }
+            _ => {
+                tracing::warn!("security_memory: unknown migration version {v} — skipping");
+                break;
+            }
+        }
+
+        conn.execute(
+            "INSERT INTO schema_version (version) VALUES (?1)",
+            params![v],
+        )?;
+
+        tracing::info!("security_memory: applied migration v{v}");
+    }
+
+    Ok(())
+}
+
 impl SecurityMemory {
     pub fn open(path: &str) -> Result<Self> {
         let conn = Connection::open(path)?;
-        conn.execute_batch("
-            CREATE TABLE IF NOT EXISTS alarm_history (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                timestamp_ms INTEGER NOT NULL,
-                level TEXT NOT NULL,
-                danger_score REAL,
-                note TEXT,
-                decision TEXT,
-                created_at DATETIME DEFAULT CURRENT_TIMESTAMP
-            );
-            CREATE TABLE IF NOT EXISTS vision_history (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                timestamp_ms INTEGER NOT NULL,
-                behavior TEXT,
-                risk_score REAL,
-                person_detected INTEGER,
-                person_name TEXT,
-                created_at DATETIME DEFAULT CURRENT_TIMESTAMP
-            );
-            CREATE TABLE IF NOT EXISTS false_alarm_log (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                alarm_id TEXT,
-                confirmed_false INTEGER DEFAULT 0,
-                note TEXT,
-                created_at DATETIME DEFAULT CURRENT_TIMESTAMP
-            );
-            CREATE TABLE IF NOT EXISTS decision_log (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                timestamp_ms INTEGER NOT NULL,
-                event_id TEXT NOT NULL,
-                camera_id TEXT NOT NULL,
-                action TEXT NOT NULL,
-                is_safety_critical INTEGER NOT NULL,
-                dominant_dimension TEXT NOT NULL,
-                consul_synthesis TEXT,
-                consul_confidence REAL,
-                created_at DATETIME DEFAULT CURRENT_TIMESTAMP
-            );
-            -- Offline buffer: VisionEvents that failed to reach alarm_grader_agent
-            CREATE TABLE IF NOT EXISTS event_buffer (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                event_json TEXT NOT NULL,
-                target_url TEXT NOT NULL,
-                queued_at INTEGER NOT NULL,
-                attempts INTEGER DEFAULT 0
-            );
-        ")?;
+        run_migrations(&conn)?;
         Ok(Self { conn })
     }
 

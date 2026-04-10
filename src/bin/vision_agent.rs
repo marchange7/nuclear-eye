@@ -1,4 +1,5 @@
 use anyhow::{Context, Result};
+use axum::{routing::get, Router};
 use nuclear_eye::{caption_to_vision_event, now_ms, SecurityConfig, VisionEvent};
 use nuclear_eye::memory::SecurityMemory;
 use reqwest::Client;
@@ -10,6 +11,50 @@ use uuid::Uuid;
 const MAX_RETRIES: u32 = 3;
 const MAX_BUFFER_ATTEMPTS: i32 = 10;
 const FLUSH_INTERVAL_SECS: u64 = 30;
+
+// ── RTSP / OpenCV frame capture ───────────────────────────────────────────────
+//
+// Q1: If CAMERA_URL is set, vision_agent captures frames directly from the RTSP
+// stream and encodes them as JPEG for FastVLM, bypassing the Python snapshot server.
+//
+// Requires: the `opencv` or `gstreamer` feature (not enabled by default).
+// On b450: install libopencv-dev and enable the `opencv` feature in Cargo.toml.
+//
+// If CAMERA_URL is not set, vision_agent falls back to:
+//   1. CAMERA_SNAPSHOT_URL / SNAPSHOT_URL (HTTP JPEG endpoint) — real mode.
+//   2. Synthetic events if VISION_ALLOW_SYNTHETIC=true — mock/dev mode.
+//
+// CAMERA_FPS controls how many frames per second are grabbed (default: 5).
+// The vision tick rate (VISION_TICK_MS / vision.tick_ms) then paces VLM calls.
+
+/// Grab one JPEG frame from an RTSP stream URL using OpenCV VideoCapture.
+///
+/// This function is only compiled when the `opencv` feature is enabled.
+/// Without the feature it always returns None and logs a one-time warning.
+#[cfg(feature = "opencv")]
+fn grab_rtsp_frame(camera_url: &str) -> Option<Vec<u8>> {
+    use opencv::{core, imgcodecs, videoio::{self, VideoCapture, CAP_ANY}};
+    let mut cap = VideoCapture::from_file(camera_url, CAP_ANY).ok()?;
+    if !cap.is_opened().unwrap_or(false) {
+        warn!(url = %camera_url, "RTSP VideoCapture failed to open");
+        return None;
+    }
+    let mut frame = core::Mat::default();
+    cap.read(&mut frame).ok()?;
+    if frame.empty() {
+        return None;
+    }
+    let mut buf = core::Vector::<u8>::new();
+    imgcodecs::imencode(".jpg", &frame, &mut buf, &core::Vector::new()).ok()?;
+    Some(buf.to_vec())
+}
+
+#[cfg(not(feature = "opencv"))]
+fn grab_rtsp_frame(_camera_url: &str) -> Option<Vec<u8>> {
+    // opencv feature not enabled — RTSP capture unavailable at compile time.
+    // Enable the `opencv` feature in Cargo.toml and install libopencv-dev.
+    None
+}
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -35,6 +80,17 @@ async fn main() -> Result<()> {
         .map(|v| matches!(v.to_ascii_lowercase().as_str(), "1" | "true" | "yes"))
         .unwrap_or(false);
 
+    // Q1: RTSP camera support.
+    // CAMERA_URL=rtsp://admin:pass@192.168.1.100:554/stream — direct RTSP capture.
+    // Requires the `opencv` feature (libopencv-dev on b450).
+    // CAMERA_FPS controls frame grab rate (default: 5). Actual VLM call rate is
+    // governed by vision.tick_ms; CAMERA_FPS limits how often we grab from RTSP.
+    let rtsp_url = std::env::var("CAMERA_URL").ok().filter(|s| !s.is_empty());
+    let _camera_fps: u64 = std::env::var("CAMERA_FPS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(5);
+
     let memory_path = {
         let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
         format!("{home}/.nuclear-eye/memory.db")
@@ -55,6 +111,32 @@ async fn main() -> Result<()> {
         }
     });
 
+    // Q4: health sidecar for Lucky7 doctor probes
+    // Binds on VISION_HEALTH_PORT (default 8090). Returns {"status":"ok"} on GET /health.
+    {
+        let health_port: u16 = std::env::var("VISION_HEALTH_PORT")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(8090);
+        let bind_host = std::env::var("BIND_HOST").unwrap_or_else(|_| "127.0.0.1".into());
+        let addr = format!("{bind_host}:{health_port}");
+        let health_app = Router::new()
+            .route("/health", get(|| async {
+                axum::Json(serde_json::json!({"status":"ok","service":"vision_agent"}))
+            }));
+        match tokio::net::TcpListener::bind(&addr).await {
+            Ok(listener) => {
+                info!("vision_agent health sidecar listening on {addr}");
+                tokio::spawn(async move {
+                    if let Err(e) = axum::serve(listener, health_app).await {
+                        warn!("vision_agent health sidecar error: {e}");
+                    }
+                });
+            }
+            Err(e) => warn!("vision_agent: could not bind health sidecar on {addr}: {e}"),
+        }
+    }
+
     // Env var > vision config > top-level fastvlm_url
     let snapshot_url = std::env::var("CAMERA_SNAPSHOT_URL").ok()
         .or_else(|| std::env::var("SNAPSHOT_URL").ok())
@@ -63,26 +145,58 @@ async fn main() -> Result<()> {
         .or_else(|| cfg.vision.fastvlm_url.clone())
         .or_else(|| cfg.fastvlm_url.clone());
 
-    if let Some(ref snap) = snapshot_url {
+    // Log startup mode
+    if let Some(ref url) = rtsp_url {
+        if cfg!(feature = "opencv") {
+            info!("vision_agent.mode=rtsp camera_url={url} target_url={target_url} camera_id={camera_id}");
+        } else {
+            warn!(
+                "vision_agent: CAMERA_URL={url} is set but the `opencv` feature is not compiled in; \
+                 enable it in Cargo.toml and install libopencv-dev. Falling through to snapshot/synthetic."
+            );
+        }
+    } else if let Some(ref snap) = snapshot_url {
         info!("vision_agent.mode=real snapshot_url={snap} target_url={target_url} camera_id={camera_id}");
     } else if allow_synthetic {
         warn!("vision_agent.mode=synthetic target_url={target_url} camera_id={camera_id} VISION_ALLOW_SYNTHETIC=true");
     } else {
-        error!("vision_agent has no snapshot source configured; synthetic mode is disabled");
+        error!("vision_agent has no snapshot source configured (CAMERA_URL, CAMERA_SNAPSHOT_URL, or VISION_ALLOW_SYNTHETIC); stopping");
     }
 
     let mut index: u64 = 0;
     loop {
         index += 1;
-        let event = match (&snapshot_url, &fastvlm_url) {
-            (Some(snap_url), Some(vlm_url)) => {
-                capture_and_analyze(&client, snap_url, vlm_url, &camera_id)
-                    .await
+
+        // Priority: RTSP (opencv) > HTTP snapshot > synthetic
+        let event = if let (Some(ref url), Some(ref vlm_url)) = (&rtsp_url, &fastvlm_url) {
+            // Q1: grab RTSP frame, encode as JPEG, describe via FastVLM
+            match grab_rtsp_frame(url) {
+                Some(jpeg) => {
+                    if cfg!(feature = "opencv") {
+                        describe_image(vlm_url, &jpeg).await
+                            .map(|caption| caption_to_vision_event(&camera_id, &caption, now_ms()))
+                    } else {
+                        // Feature not compiled: warn once per cycle and fall through
+                        warn!("CAMERA_URL set but opencv feature not enabled — install libopencv-dev and enable feature");
+                        None
+                    }
+                }
+                None => {
+                    warn!(url = %url, "RTSP frame grab returned no data; skipping cycle");
+                    None
+                }
             }
-            _ if allow_synthetic => Some(build_event(index, &camera_id)),
-            _ => {
-                warn!("vision_agent degraded: missing snapshot_url or fastvlm_url; skipping cycle");
-                None
+        } else {
+            match (&snapshot_url, &fastvlm_url) {
+                (Some(snap_url), Some(vlm_url)) => {
+                    capture_and_analyze(&client, snap_url, vlm_url, &camera_id)
+                        .await
+                }
+                _ if allow_synthetic => Some(build_event(index, &camera_id)),
+                _ => {
+                    warn!("vision_agent degraded: missing snapshot_url or fastvlm_url; skipping cycle");
+                    None
+                }
             }
         };
 

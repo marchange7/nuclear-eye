@@ -5,21 +5,24 @@
 //   2. Compare two embeddings via cosine similarity    (`cosine_similarity`)
 //
 // The Python sidecar (face_embedding_service.py) must be running at
-// FACE_EMBED_URL (default http://127.0.0.1:5555) for real biometric matching.
-// If the sidecar is unreachable, all functions return `Err` and face_db falls
-// back to existing text search — no crash, no silent degradation.
+// ARCFACE_URL (default http://127.0.0.1:5555, env: FACE_EMBED_URL) for biometric matching.
+// If the sidecar is unreachable, all functions return `Err`.
+// face_db returns "unknown" — no text-hint fallback, no silent degradation (Z10).
 
 use anyhow::{bail, Result};
 use serde::{Deserialize, Serialize};
 
 /// Default URL of the face_embedding_service.py sidecar.
+/// Configurable via ARCFACE_URL env (canonical) or FACE_EMBED_URL (legacy alias).
 const DEFAULT_EMBED_URL: &str = "http://127.0.0.1:5555";
 
 /// Read timeout for embedding calls (ms). Embedding is CPU-bound ~50-150ms.
 const EMBED_TIMEOUT_MS: u64 = 2000;
 
 fn embed_url() -> String {
-    std::env::var("FACE_EMBED_URL").unwrap_or_else(|_| DEFAULT_EMBED_URL.to_string())
+    std::env::var("ARCFACE_URL")
+        .or_else(|_| std::env::var("FACE_EMBED_URL"))
+        .unwrap_or_else(|_| DEFAULT_EMBED_URL.to_string())
 }
 
 // ── Wire types ────────────────────────────────────────────────────────────────

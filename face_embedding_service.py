@@ -20,10 +20,12 @@ CPU is the default (Jetson / b450 without CUDA fallback).
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import io
 import logging
 import os
+from datetime import datetime, timedelta, timezone
 from typing import List, Optional
 
 import numpy as np
@@ -156,6 +158,95 @@ def _embed(image_b64: str, max_faces: int = 1) -> tuple[list[list[float]], list[
     return embeddings, scores
 
 
+# ── GDPR purge ────────────────────────────────────────────────────────────────
+
+GDPR_RETENTION_DAYS = int(os.environ.get("GDPR_FACE_RETENTION_DAYS", "30"))
+_FACE_DB_DIR = os.environ.get("FACE_DB_DIR", "/app/face_db")
+_DATABASE_URL = os.environ.get("DATABASE_URL", "")
+
+
+async def purge_old_faces() -> int:
+    """
+    Delete face records not seen within GDPR_RETENTION_DAYS (default 30).
+
+    Supports two storage backends:
+    1. PostgreSQL (DATABASE_URL set): deletes rows from the faces table where
+       last_seen_at < now() - interval.
+    2. Filesystem fallback (FACE_DB_DIR): deletes subdirectories/files whose
+       mtime is older than the retention window.
+
+    Returns the count of deleted records/files.
+    """
+    cutoff = datetime.now(tz=timezone.utc) - timedelta(days=GDPR_RETENTION_DAYS)
+    deleted = 0
+
+    if _DATABASE_URL:
+        try:
+            import asyncpg  # optional dep — only needed when DATABASE_URL is set
+
+            conn = await asyncpg.connect(_DATABASE_URL)
+            try:
+                result = await conn.execute(
+                    """
+                    DELETE FROM faces
+                    WHERE last_seen_at < $1
+                    """,
+                    cutoff,
+                )
+                # asyncpg returns "DELETE N" as a string
+                deleted = int(result.split()[-1]) if result else 0
+                logger.info(
+                    "GDPR purge (postgres): deleted %d face records older than %d days",
+                    deleted,
+                    GDPR_RETENTION_DAYS,
+                )
+            finally:
+                await conn.close()
+        except Exception as exc:
+            logger.error("GDPR purge (postgres) failed: %s", exc)
+    else:
+        # Filesystem fallback: treat each top-level entry in FACE_DB_DIR as one identity.
+        # Each identity dir/file is purged if its mtime (last access) is past the cutoff.
+        import os as _os
+
+        cutoff_ts = cutoff.timestamp()
+        try:
+            for entry in _os.scandir(_FACE_DB_DIR):
+                try:
+                    mtime = entry.stat().st_mtime
+                    if mtime < cutoff_ts:
+                        if entry.is_dir(follow_symlinks=False):
+                            import shutil
+                            shutil.rmtree(entry.path, ignore_errors=True)
+                        else:
+                            _os.remove(entry.path)
+                        deleted += 1
+                        logger.debug("GDPR purge: removed %s (mtime %s)", entry.path, datetime.fromtimestamp(mtime))
+                except Exception as exc:
+                    logger.warning("GDPR purge: could not remove %s: %s", entry.path, exc)
+            logger.info(
+                "GDPR purge (filesystem): deleted %d face entries older than %d days",
+                deleted,
+                GDPR_RETENTION_DAYS,
+            )
+        except FileNotFoundError:
+            logger.debug("GDPR purge: FACE_DB_DIR %s does not exist, skipping", _FACE_DB_DIR)
+        except Exception as exc:
+            logger.error("GDPR purge (filesystem) failed: %s", exc)
+
+    return deleted
+
+
+async def gdpr_purge_loop() -> None:
+    """Background task: run purge_old_faces() every 24 hours."""
+    while True:
+        try:
+            await purge_old_faces()
+        except Exception as exc:
+            logger.error("gdpr_purge_loop unexpected error: %s", exc)
+        await asyncio.sleep(86400)  # 24 hours
+
+
 # ── FastAPI app ───────────────────────────────────────────────────────────────
 
 app = FastAPI(
@@ -167,11 +258,18 @@ app = FastAPI(
 
 @app.on_event("startup")
 async def _startup():
-    """Pre-warm the model so the first request doesn't pay load latency."""
+    """Pre-warm the model and start GDPR purge background task."""
     try:
         _get_model()
     except Exception as exc:
         logger.warning("model pre-warm failed (will retry on first request): %s", exc)
+
+    asyncio.create_task(gdpr_purge_loop())
+    logger.info(
+        "GDPR purge loop started (retention=%d days, backend=%s)",
+        GDPR_RETENTION_DAYS,
+        "postgres" if _DATABASE_URL else f"filesystem:{_FACE_DB_DIR}",
+    )
 
 
 @app.get("/health")

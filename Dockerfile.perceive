@@ -1,0 +1,25 @@
+FROM python:3.11-slim
+
+WORKDIR /app
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    curl \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY perceive_service.py .
+
+RUN pip install --no-cache-dir \
+    fastapi \
+    uvicorn[standard] \
+    aiohttp \
+    httpx \
+    numpy \
+    Pillow \
+    onnxruntime-gpu
+
+EXPOSE 8091
+
+HEALTHCHECK --interval=30s --timeout=5s --start-period=10s \
+    CMD curl -f http://localhost:8091/health || exit 1
+
+CMD ["uvicorn", "perceive_service:app", "--host", "0.0.0.0", "--port", "8091"]
