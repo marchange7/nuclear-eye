@@ -215,3 +215,85 @@ pub async fn emit_face_identified(
     };
     post_domain_event(client, "vision.face_identified", "vision", Some("text"), value).await;
 }
+
+// ── JJ1: Sentinelle domain events (continuous learning pipeline) ─────────────
+
+/// sentinelle.alarm — alarm decision for continuous learning.
+#[derive(Debug, Serialize)]
+pub struct SentinelleAlarmPayload {
+    pub alarm_id: String,
+    pub camera_id: String,
+    pub level: String,
+    pub danger_score: f64,
+    pub risk_score: f64,
+    pub stress_level: f64,
+    pub confidence: f64,
+    pub behavior: String,
+    pub person_detected: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub person_name: Option<String>,
+    pub ts: u64,
+    /// JJ6: Raw depth context forwarded from nuclear-scout (preserved verbatim
+    /// so the learning pipeline can correlate depth features with alarm outcomes).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub depth_context: Option<serde_json::Value>,
+}
+
+/// sentinelle.feedback — operator annotation on alarm decision.
+#[derive(Debug, Serialize)]
+pub struct SentinelleFeedbackPayload {
+    pub alarm_id: String,
+    pub camera_id: String,
+    pub feedback: String,  // "false_alarm", "confirmed", "escalate"
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub operator: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub notes: Option<String>,
+    pub ts: u64,
+}
+
+/// sentinelle.face — face identity match for learning pipeline.
+#[derive(Debug, Serialize)]
+pub struct SentinelleFacePayload {
+    pub camera_id: String,
+    pub name: String,
+    pub authorized: bool,
+    pub similarity: f32,
+    pub ts: u64,
+}
+
+/// JJ1: Emit `sentinelle.alarm` to La Rivière.
+pub async fn emit_sentinelle_alarm(
+    client: &reqwest::Client,
+    payload: SentinelleAlarmPayload,
+) {
+    let value = match serde_json::to_value(&payload) {
+        Ok(v) => v,
+        Err(e) => { tracing::warn!(error = %e, "emit_sentinelle_alarm: serialize failed"); return; }
+    };
+    post_domain_event(client, "sentinelle.alarm", "sentinelle", None, value).await;
+}
+
+/// JJ1: Emit `sentinelle.feedback` to La Rivière.
+pub async fn emit_sentinelle_feedback(
+    client: &reqwest::Client,
+    payload: SentinelleFeedbackPayload,
+) {
+    let value = match serde_json::to_value(&payload) {
+        Ok(v) => v,
+        Err(e) => { tracing::warn!(error = %e, "emit_sentinelle_feedback: serialize failed"); return; }
+    };
+    post_domain_event(client, "sentinelle.feedback", "sentinelle", None, value).await;
+}
+
+/// JJ1: Emit `sentinelle.face` to La Rivière.
+pub async fn emit_sentinelle_face(
+    client: &reqwest::Client,
+    payload: SentinelleFacePayload,
+) {
+    let value = match serde_json::to_value(&payload) {
+        Ok(v) => v,
+        Err(e) => { tracing::warn!(error = %e, "emit_sentinelle_face: serialize failed"); return; }
+    };
+    post_domain_event(client, "sentinelle.face", "sentinelle", None, value).await;
+}

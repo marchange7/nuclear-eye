@@ -8,5 +8,6 @@ dependencies = [
     "opencv-python-headless>=4.8",
     "httpx>=0.27",
     "pillow>=10.0",
+    "requests>=2.31",
     "toml>=0.10",
 ]

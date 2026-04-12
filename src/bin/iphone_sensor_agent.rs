@@ -221,9 +221,13 @@ fn iphone_to_vision_events(data: &IPhoneSensorData) -> Vec<VisionEvent> {
                     let mut tags = vec!["nuclear-scout".to_string()];
                     if p.is_using_phone { tags.push("phone-distracted".to_string()); }
                     if !data.lidar_available { tags.push("no-lidar".to_string()); }
+                    if let Some(ref model) = data.vlm_model {
+                        tags.push(format!("vlm:{model}"));
+                    }
                     tags
                 },
-                vlm_caption: None,
+                vlm_caption: data.vlm_caption.clone(),
+                depth_context: None,
             }
         })
         .collect()

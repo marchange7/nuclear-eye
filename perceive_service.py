@@ -44,7 +44,10 @@ _perceive_degraded = False
 
 
 async def check_wrapper_health():
-    """Y6: Verify nuclear-wrapper is reachable before serving. Exits process on failure."""
+    """Y6: Verify nuclear-wrapper is reachable before serving. Skip if WRAPPER_URL is empty."""
+    if not WRAPPER_URL:
+        print("[perceive] NUCLEAR_WRAPPER_URL unset — skipping wrapper guard (dev mode)", flush=True)
+        return
     try:
         r = await httpx.AsyncClient().get(f"{WRAPPER_URL}/health", timeout=5.0)
         if r.status_code != 200:
@@ -60,6 +63,8 @@ async def check_wrapper_health():
 async def wrapper_monitor():
     """Y6: Periodic wrapper health check every 60s. Enters degraded mode if wrapper goes away."""
     global _perceive_degraded
+    if not WRAPPER_URL:
+        return  # dev mode — no wrapper guard
     while True:
         await asyncio.sleep(WRAPPER_POLL_INTERVAL_SECS)
         try:
@@ -186,27 +191,87 @@ async def call_ser(session: aiohttp.ClientSession, audio_b64: str, sample_rate: 
     return None
 
 
+_fer_session: Optional[object] = None  # onnxruntime.InferenceSession
+_fer_classes: list = ["angry", "disgust", "fear", "happy", "neutral", "sad", "surprise"]
+
+# Russell circumplex: valence/arousal per FER class
+_FER_AFFECT: dict = {
+    "angry":   (-0.6,  0.8),
+    "disgust": (-0.5,  0.2),
+    "fear":    (-0.7,  0.7),
+    "happy":   ( 0.8,  0.5),
+    "neutral": ( 0.0,  0.0),
+    "sad":     (-0.6, -0.4),
+    "surprise":( 0.1,  0.8),
+}
+
+
+def _load_fer_model() -> bool:
+    """Load EfficientViT FER ONNX model. Returns True on success."""
+    global _fer_session, _fer_classes
+    if _fer_session is not None:
+        return True
+    model_path = os.getenv("FER_MODEL_PATH", "/etc/nuclear/models/fer_efficientvit.onnx")
+    classes_path = os.getenv("FER_CLASSES_PATH", "/etc/nuclear/models/fer_efficientvit_classes.json")
+    if not os.path.exists(model_path):
+        return False
+    try:
+        import onnxruntime as ort
+        opts = ort.SessionOptions()
+        opts.inter_op_num_threads = 2
+        opts.intra_op_num_threads = 2
+        providers = ["CUDAExecutionProvider", "CPUExecutionProvider"]
+        _fer_session = ort.InferenceSession(model_path, sess_options=opts, providers=providers)
+        if os.path.exists(classes_path):
+            with open(classes_path) as f:
+                data = json.load(f)
+                _fer_classes = data.get("classes", _fer_classes)
+        print(f"[perceive] FER ONNX loaded: {model_path}  classes={_fer_classes}", flush=True)
+        return True
+    except Exception as e:
+        print(f"[perceive] FER ONNX load failed: {e}", flush=True)
+        return False
+
+
 async def call_fer(session: aiohttp.ClientSession, frame_b64: str) -> Optional[dict]:
-    """Stub: call face_embedding_service or return None."""
-    # face_embedding_service is ArcFace-based (:5555) for identity, not emotion.
-    # FER is done on-device (nuclear-scout). This stub is for server-side use.
-    # When EfficientViT model is deployed, replace this stub.
-    # For now: decode frame and run energy heuristic.
+    """Run EfficientViT FER on the given base64 JPEG frame."""
     try:
         import numpy as np
+        from PIL import Image
+        import io as _io
+
+        if not _load_fer_model():
+            return None
+
         img_bytes = base64.b64decode(frame_b64)
-        # Very basic brightness heuristic as mock FER
-        gray_mean = float(np.frombuffer(img_bytes[:100], dtype=np.uint8).mean()) / 255.0
-        emotion = "neutral"
-        confidence = 0.5
+        pil_img = Image.open(_io.BytesIO(img_bytes)).convert("RGB").resize((224, 224))
+        arr = np.array(pil_img, dtype=np.float32) / 255.0
+        mean = np.array([0.485, 0.456, 0.406], dtype=np.float32)
+        std  = np.array([0.229, 0.224, 0.225], dtype=np.float32)
+        arr = (arr - mean) / std
+        arr = arr.transpose(2, 0, 1)[np.newaxis]  # (1, 3, 224, 224)
+
+        logits = _fer_session.run(None, {_fer_session.get_inputs()[0].name: arr})[0][0]
+        # softmax
+        exp_l = np.exp(logits - logits.max())
+        probs = exp_l / exp_l.sum()
+
+        idx = int(probs.argmax())
+        n_cls = min(len(_fer_classes), len(probs))
+        emotion = _fer_classes[idx] if idx < n_cls else "neutral"
+        confidence = float(probs[idx]) if idx < len(probs) else 0.0
+        valence, arousal = _FER_AFFECT.get(emotion, (0.0, 0.0))
+
         return {
             "emotion": emotion,
-            "confidence": confidence,
-            "valence": 0.0,
-            "arousal": 0.0,
-            "source": "mock_stub",
+            "confidence": round(confidence, 4),
+            "valence": valence,
+            "arousal": arousal,
+            "source": "fer_onnx",
+            "all_probs": {_fer_classes[i]: round(float(probs[i]), 4) for i in range(n_cls)},
         }
-    except Exception:
+    except Exception as e:
+        print(f"[perceive] FER inference error: {e}", flush=True)
         return None
 
 

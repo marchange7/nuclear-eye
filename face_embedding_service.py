@@ -25,8 +25,11 @@ import base64
 import io
 import logging
 import os
+import time
 from datetime import datetime, timedelta, timezone
 from typing import List, Optional
+
+import requests
 
 import numpy as np
 import uvicorn
@@ -114,6 +117,27 @@ class CompareResponse(BaseModel):
     threshold: float
 
 
+class RegisterRequest(BaseModel):
+    """JJ3: Notify the sidecar that a face was registered/upserted in face_db."""
+
+    name: str
+    """Identity label stored in face_db."""
+
+    authorized: bool = True
+    """Whether this face is marked as authorized."""
+
+    similarity: float = 1.0
+    """Cosine similarity at registration time (1.0 for new enrollments)."""
+
+    camera_id: str = "registration"
+    """Source camera or 'registration' for manual enrollment."""
+
+
+class RegisterResponse(BaseModel):
+    ok: bool
+    event_emitted: bool
+
+
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
 SAME_PERSON_THRESHOLD = float(os.environ.get("ARCFACE_THRESHOLD", "0.28"))
@@ -156,6 +180,36 @@ def _embed(image_b64: str, max_faces: int = 1) -> tuple[list[list[float]], list[
     embeddings = [face.normed_embedding.tolist() for face in faces]
     scores = [float(face.det_score) for face in faces]
     return embeddings, scores
+
+
+# ── JJ3: La Rivière face event ────────────────────────────────────────────────
+
+
+def _emit_face_event(name: str, authorized: bool, similarity: float, camera_id: str = "registration"):
+    """JJ3: Fire-and-forget face event to La Rivière (fortress /v1/events)."""
+    import threading
+
+    fortress_url = os.getenv("FORTRESS_URL", "http://localhost:7700")
+    payload = {
+        "event_type": "sentinelle.face",
+        "source_domain": "sentinelle",
+        "payload": {
+            "source": "sentinelle-face",
+            "camera_id": camera_id,
+            "name": name,
+            "authorized": authorized,
+            "similarity": similarity,
+            "ts": int(time.time() * 1000),
+        },
+    }
+
+    def _post():
+        try:
+            requests.post(f"{fortress_url}/v1/events", json=payload, timeout=0.5)
+        except Exception:
+            pass
+
+    threading.Thread(target=_post, daemon=True).start()
 
 
 # ── GDPR purge ────────────────────────────────────────────────────────────────
@@ -327,6 +381,28 @@ async def compare(req: CompareRequest):
         same_person=sim >= SAME_PERSON_THRESHOLD,
         threshold=SAME_PERSON_THRESHOLD,
     )
+
+
+@app.post("/register", response_model=RegisterResponse)
+async def register(req: RegisterRequest):
+    """
+    JJ3: Notify La Rivière that a face identity was registered or updated in face_db.
+
+    Called by the Rust face_db agent after a successful INSERT/UPSERT into the faces
+    table.  Emits a fire-and-forget sentinelle.face event to fortress /v1/events so
+    the event lands in La Rivière for the training pipeline.
+
+    The embedding itself is computed and stored by the Rust caller — this endpoint
+    is purely the event bridge.
+    """
+    _emit_face_event(
+        name=req.name,
+        authorized=req.authorized,
+        similarity=req.similarity,
+        camera_id=req.camera_id,
+    )
+    logger.info("JJ3: sentinelle.face emitted for '%s' (authorized=%s)", req.name, req.authorized)
+    return RegisterResponse(ok=True, event_emitted=True)
 
 
 # ── Entrypoint ────────────────────────────────────────────────────────────────
