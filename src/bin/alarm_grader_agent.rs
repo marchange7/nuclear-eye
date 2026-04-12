@@ -101,6 +101,10 @@ struct AppState {
     comms_api_token: Option<String>,
     /// Recipient phone/Signal number for High-alarm notifications (E.164).
     comms_alert_recipient: Option<String>,
+    /// Optional bearer token for POST /feedback.
+    /// Set ALARM_GRADER_FEEDBACK_TOKEN to require authentication on the feedback endpoint.
+    /// If unset, the endpoint is open (internal-only — bind behind a gateway or VPN).
+    feedback_token: Option<String>,
 }
 
 #[tokio::main]
@@ -158,6 +162,7 @@ async fn main() -> Result<()> {
     let comms_url = std::env::var("COMMS_URL").ok().filter(|s| !s.is_empty());
     let comms_api_token = std::env::var("COMMS_API_TOKEN").ok().filter(|s| !s.is_empty() && !s.starts_with("TODO"));
     let comms_alert_recipient = std::env::var("COMMS_ALERT_RECIPIENT").ok().filter(|s| s.starts_with('+'));
+    let feedback_token = std::env::var("ALARM_GRADER_FEEDBACK_TOKEN").ok().filter(|s| !s.is_empty());
 
     let state = AppState {
         grader: Arc::new(Mutex::new(grader)),
@@ -171,11 +176,13 @@ async fn main() -> Result<()> {
         comms_url,
         comms_api_token,
         comms_alert_recipient,
+        feedback_token,
     };
 
     let app = Router::new()
         .route("/ingest", post(ingest))
         .route("/sensor/camera", post(handle_camera_frame))
+        .route("/feedback", post(handle_feedback))
         .route("/summary", get(summary))
         .route("/ws", get(ws_handler))
         .route("/health", get(alarm_health))
@@ -239,6 +246,65 @@ async fn process_event(
         let mut grader = state.grader.lock().await;
         grader.grade_event(&event)
     };
+
+    // JJ6: Depth-enhanced scoring — apply LiDAR adjustments before any fan-out.
+    //
+    // If depth context is present, `depth_adjust_score` may:
+    //   • Suppress the alarm entirely (all blobs < 0.5m height → cat/pet)
+    //   • Force Critical (fall_detected = true)
+    //   • Amplify or attenuate based on interpersonal distance zone
+    //
+    // The adjusted score re-maps through map_danger_to_level so the alarm level
+    // remains consistent with the grader's configured thresholds.
+    if let Some(ref depth) = event.depth_context {
+        let base = alarm.danger_score as f32;
+        let (adjusted, suppress_reason) = depth_adjust_score(base, depth);
+        if let Some(ref reason) = suppress_reason {
+            tracing::info!(
+                event_id = %event.event_id,
+                camera_id = %event.camera_id,
+                reason = %reason,
+                "JJ6: alarm suppressed by depth context"
+            );
+            alarm.level = AlarmLevel::None;
+            alarm.danger_score = 0.0;
+            alarm.note.push_str(&format!(" | depth-suppressed: {reason}"));
+        } else if (adjusted - base).abs() > 1e-4 {
+            alarm.danger_score = adjusted as f64;
+            // Re-derive level from adjusted score using grader thresholds.
+            let thresholds = {
+                let grader = state.grader.lock().await;
+                grader.danger_thresholds
+            };
+            alarm.level = if adjusted >= thresholds[2] as f32 {
+                AlarmLevel::High
+            } else if adjusted >= thresholds[1] as f32 {
+                AlarmLevel::Medium
+            } else if adjusted >= thresholds[0] as f32 {
+                AlarmLevel::Low
+            } else {
+                AlarmLevel::None
+            };
+            tracing::debug!(
+                event_id = %event.event_id,
+                base_score = base,
+                adjusted_score = adjusted,
+                level = %alarm.level,
+                "JJ6: depth-adjusted danger score"
+            );
+        }
+    }
+
+    // JJ6-H: Sync the hysteresis window with the depth-adjusted outcome.
+    // grade_event() pushed the pre-depth alarm into recent_events; overwrite
+    // its level/score so future hysteresis decisions see the real result.
+    if event.depth_context.is_some() {
+        let mut grader = state.grader.lock().await;
+        if let Some(last) = grader.recent_events.back_mut() {
+            last.level = alarm.level.clone();
+            last.danger_score = alarm.danger_score;
+        }
+    }
 
     // For High alarms, fire Consul deliberation and penny-brain in parallel.
     // Consul gets up to CONSUL_TIMEOUT_MS; penny-brain gets 500ms.
@@ -389,7 +455,105 @@ async fn process_event(
         });
     }
 
-    // 1d. Legacy La Rivière stream (reflection surface — backward compat)
+    // 1d. JJ1: sentinelle.alarm domain event (continuous learning pipeline)
+    //         JJ6: depth_context forwarded verbatim for learning pipeline correlation.
+    {
+        let http = state.http.clone();
+        let alarm_id = alarm.alarm_id.clone();
+        let cam_id = event.camera_id.clone();
+        let level = alarm.level.to_string();
+        let danger_score = alarm.danger_score;
+        let risk_score = event.risk_score;
+        let stress_level = event.stress_level;
+        let confidence = event.confidence;
+        let behavior = event.behavior.clone();
+        let person_detected = event.person_detected;
+        let person_name = event.person_name.clone();
+        let ts = event.timestamp_ms;
+        // JJ6: Serialize depth context to Value so it's preserved in the Rivière payload
+        // without coupling riviere.rs to the DepthContext type.
+        let depth_context_value = event
+            .depth_context
+            .as_ref()
+            .and_then(|d| serde_json::to_value(d).ok());
+        tokio::spawn(async move {
+            riviere::emit_sentinelle_alarm(&http, riviere::SentinelleAlarmPayload {
+                alarm_id,
+                camera_id: cam_id,
+                level,
+                danger_score,
+                risk_score,
+                stress_level,
+                confidence,
+                behavior,
+                person_detected,
+                person_name,
+                ts,
+                depth_context: depth_context_value,
+            }).await;
+        });
+    }
+
+    // 1e-GG4. Push active alarm context to Fortress agent memory (Emile + Arianne)
+    //         Medium or High → write active_alarm key; None or Low → clear it.
+    {
+        let http = state.http.clone();
+        let level_str = alarm.level.to_string();
+        let is_active = matches!(alarm.level, AlarmLevel::Medium | AlarmLevel::High);
+        let risk_score = alarm.risk_score;
+        let danger_score = alarm.danger_score;
+        let cam_id = event.camera_id.clone();
+        let behavior = event.behavior.clone();
+        let decision = alarm.note.clone();
+        let ts = alarm.timestamp_ms;
+        tokio::spawn(async move {
+            let fortress_url = std::env::var("FORTRESS_URL")
+                .unwrap_or_else(|_| "http://127.0.0.1:7700".to_string());
+            let api_token = std::env::var("FORTRESS_API_TOKEN").unwrap_or_default();
+            let timestamp = chrono::Utc::now().to_rfc3339();
+            let value = if is_active {
+                serde_json::json!({
+                    "level": level_str,
+                    "risk_score": risk_score,
+                    "danger_score": danger_score,
+                    "camera_id": cam_id,
+                    "behavior": behavior,
+                    "decision": decision,
+                    "ts": ts,
+                })
+            } else {
+                serde_json::Value::Null
+            };
+            let payload = serde_json::json!({
+                "key": "active_alarm",
+                "value": value,
+                "timestamp": timestamp,
+            });
+            for agent in &["arianne", "emile"] {
+                let url = format!("{fortress_url}/v1/agents/{agent}/memory");
+                let result = http
+                    .post(&url)
+                    .bearer_auth(&api_token)
+                    .json(&payload)
+                    .timeout(std::time::Duration::from_millis(500))
+                    .send()
+                    .await;
+                match result {
+                    Ok(r) if r.status().is_success() => {
+                        tracing::debug!(agent = %agent, level = %level_str, "GG4: active_alarm memory pushed");
+                    }
+                    Ok(r) => {
+                        tracing::warn!(agent = %agent, status = %r.status(), "GG4: active_alarm push non-success (non-blocking)");
+                    }
+                    Err(e) => {
+                        tracing::warn!(agent = %agent, err = %e, "GG4: active_alarm push failed (non-blocking)");
+                    }
+                }
+            }
+        });
+    }
+
+    // 1f. Legacy La Rivière stream (reflection surface — backward compat)
     {
         let triad   = AffectTriad::from_alarm_event(&alarm);
         let action  = decide(&triad, alarm.level == AlarmLevel::High).to_string();
@@ -688,7 +852,7 @@ async fn process_event(
         let level_str = alarm.level.to_string();
         let cam_id = event.camera_id.clone();
         tokio::spawn(async move {
-            if let Some(actuator_url) = std::env::var("ACTUATOR_URL").ok() {
+            if let Ok(actuator_url) = std::env::var("ACTUATOR_URL") {
                 let client = reqwest::Client::builder()
                     .timeout(Duration::from_secs(2))
                     .build()
@@ -725,6 +889,97 @@ async fn summary(State(state): State<AppState>) -> Json<AlarmSummary> {
 /// GET /health — nuclear-watch polls this to verify the alarm grader / WebSocket host is alive.
 async fn alarm_health() -> (axum::http::StatusCode, Json<serde_json::Value>) {
     (axum::http::StatusCode::OK, Json(serde_json::json!({ "ok": true, "service": "alarm_grader_agent" })))
+}
+
+// ── JJ1: Operator feedback endpoint ─────────────────────────────────────────
+
+/// Allowed `feedback` values (must match nuclear-watch `AlarmTimelineView` and any admin UI).
+const FEEDBACK_ALLOWED: &[&str] = &["false_alarm", "confirmed", "escalate", "unclear"];
+
+/// POST /feedback — operator annotation on an alarm decision.
+///
+/// Used by nuclear-watch or admin UI to mark alarms as false_alarm / confirmed.
+/// Emits `sentinelle.feedback` to La Rivière for continuous learning:
+/// the weekly harvest pipeline uses feedback to adjust alarm thresholds.
+#[derive(Debug, Deserialize)]
+struct FeedbackRequest {
+    alarm_id: String,
+    camera_id: String,
+    /// "false_alarm" | "confirmed" | "escalate" | "unclear"
+    feedback: String,
+    #[serde(default)]
+    operator: Option<String>,
+    #[serde(default)]
+    notes: Option<String>,
+}
+
+async fn handle_feedback(
+    State(state): State<AppState>,
+    headers: axum::http::HeaderMap,
+    Json(req): Json<FeedbackRequest>,
+) -> (axum::http::StatusCode, Json<serde_json::Value>) {
+    // Bearer token guard — checked when ALARM_GRADER_FEEDBACK_TOKEN is configured.
+    if let Some(ref expected) = state.feedback_token {
+        let authorized = headers
+            .get(axum::http::header::AUTHORIZATION)
+            .and_then(|v| v.to_str().ok())
+            .map(|v| v == format!("Bearer {expected}"))
+            .unwrap_or(false);
+        if !authorized {
+            warn!(alarm_id = %req.alarm_id, "feedback: unauthorized (missing or wrong token)");
+            return (
+                axum::http::StatusCode::UNAUTHORIZED,
+                Json(serde_json::json!({ "error": "unauthorized" })),
+            );
+        }
+    }
+
+    if !FEEDBACK_ALLOWED.contains(&req.feedback.as_str()) {
+        warn!(
+            alarm_id = %req.alarm_id,
+            feedback = %req.feedback,
+            "feedback: invalid feedback value"
+        );
+        return (
+            axum::http::StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({
+                "error": "invalid_feedback",
+                "allowed": FEEDBACK_ALLOWED,
+            })),
+        );
+    }
+
+    let ts = Utc::now().timestamp_millis() as u64;
+    let is_false = req.feedback == "false_alarm";
+
+    // Record to local SQLite (existing false_alarm_log table)
+    {
+        let mem = state.memory.lock().await;
+        if let Err(e) = mem.record_false_alarm(&req.alarm_id, is_false, req.notes.as_deref().unwrap_or("")) {
+            warn!(error = %e, "feedback: record_false_alarm failed");
+        }
+    }
+
+    // JJ1: Emit sentinelle.feedback to La Rivière (fire-and-forget)
+    let http = state.http.clone();
+    let alarm_id = req.alarm_id.clone();
+    let camera_id = req.camera_id.clone();
+    let feedback = req.feedback.clone();
+    let operator = req.operator.clone();
+    let notes = req.notes.clone();
+    tokio::spawn(async move {
+        riviere::emit_sentinelle_feedback(&http, riviere::SentinelleFeedbackPayload {
+            alarm_id,
+            camera_id,
+            feedback,
+            operator,
+            notes,
+            ts,
+        }).await;
+    });
+
+    info!(alarm_id = %req.alarm_id, feedback = %req.feedback, "operator feedback recorded");
+    (axum::http::StatusCode::OK, Json(serde_json::json!({ "ok": true, "alarm_id": req.alarm_id })))
 }
 
 /// Route a question through penny-brain via nuclear-sdk.
@@ -773,6 +1028,58 @@ async fn handle_watch_socket(mut socket: WebSocket, mut rx: broadcast::Receiver<
     }
 }
 
+// ── JJ6: Depth-enhanced alarm scoring ────────────────────────────────────────
+
+/// Adjust a raw danger score using LiDAR depth context from nuclear-scout.
+///
+/// Returns `(adjusted_score, suppression_reason)`.
+/// If `suppression_reason` is `Some`, the alarm should be suppressed (score = 0.0).
+///
+/// Rules applied in priority order:
+/// 1. All blobs height < 0.5m → auto-suppress (cat/pet, not a person)
+/// 2. Fall detected → always Critical (score = 1.0)
+/// 3. Zone amplification: intimate (< 0.45m) +20%, projected (> 3.6m) –15%
+/// 4. Single occupant in intimate zone → additional +10%
+fn depth_adjust_score(
+    base_score: f32,
+    depth: &nuclear_eye::DepthContext,
+) -> (f32, Option<String>) {
+    let mut score = base_score;
+
+    // Rule 1: All blobs height < 0.5m → cat/pet, auto-suppress.
+    if let Some(ref blobs) = depth.blobs {
+        if !blobs.is_empty() && blobs.iter().all(|b| b.height < 0.5) {
+            return (
+                0.0,
+                Some("auto-suppressed: all blobs height < 0.5m (cat/pet)".into()),
+            );
+        }
+    }
+
+    // Rule 2: Fall detected → Critical regardless of zone.
+    if depth.fall_detected == Some(true) {
+        return (1.0, None);
+    }
+
+    // Rule 3: Zone-based amplitude adjustment.
+    match depth.alert_zone.as_deref() {
+        Some("intimate") => score = (score * 1.2).min(1.0),   // < 0.45m: amplify
+        Some("projected") => score *= 0.85,                    // > 3.6m: attenuate
+        _ => {}
+    }
+
+    // Rule 4: Single occupant in intimate zone adds extra urgency.
+    if let (Some(count), Some("intimate")) =
+        (depth.occupant_count, depth.alert_zone.as_deref())
+    {
+        if count == 1 {
+            score = (score * 1.1).min(1.0);
+        }
+    }
+
+    (score, None)
+}
+
 // ── Sentinelle perceptual risk scorer ────────────────────────────────────────
 
 /// Multimodal risk signal fused from face, voice, and gesture perception.
@@ -801,9 +1108,9 @@ pub fn compute_perceptual_risk(
     gesture_threat: Option<f32>,
 ) -> Option<PerceptualRisk> {
     let mut n = 0u32;
-    let fc = face_negative.map(|v| { n += 1; v }).unwrap_or(0.0);
-    let vc = voice_agitated.map(|v| { n += 1; v }).unwrap_or(0.0);
-    let gc = gesture_threat.map(|v| { n += 1; v }).unwrap_or(0.0);
+    let fc = face_negative.inspect(|_| n += 1).unwrap_or(0.0);
+    let vc = voice_agitated.inspect(|_| n += 1).unwrap_or(0.0);
+    let gc = gesture_threat.inspect(|_| n += 1).unwrap_or(0.0);
     if n < 2 { return None; }
     let score = (0.4 * fc + 0.3 * vc + 0.3 * gc).clamp(0.0, 1.0);
     Some(PerceptualRisk {
@@ -813,27 +1120,6 @@ pub fn compute_perceptual_risk(
         voice_contrib:   (vc * 0.3 * 10000.0).round() / 10000.0,
         gesture_contrib: (gc * 0.3 * 10000.0).round() / 10000.0,
     })
-}
-
-#[cfg(test)]
-mod risk_tests {
-    use super::*;
-    #[test]
-    fn test_risk_alert_triggered() {
-        // angry face + attacking gesture should exceed 0.7
-        let risk = compute_perceptual_risk(Some(0.9), None, Some(1.0)).unwrap();
-        assert!(risk.alert, "angry+attacking should trigger alert");
-    }
-    #[test]
-    fn test_risk_normal_no_alert() {
-        let risk = compute_perceptual_risk(Some(0.1), Some(0.1), Some(0.0)).unwrap();
-        assert!(!risk.alert, "neutral face+calm voice should not alert");
-    }
-    #[test]
-    fn test_risk_single_modality_returns_none() {
-        let risk = compute_perceptual_risk(Some(0.9), None, None);
-        assert!(risk.is_none(), "single modality should return None");
-    }
 }
 
 // TODO: replace with nk.fortress().ingest_security() once SecurityEvent type
@@ -857,5 +1143,26 @@ async fn publish_to_mesh(alarm: &AlarmEvent, triad: &AffectTriad, decision: &str
     match result {
         Ok(resp) => info!(status = %resp.status(), "published alarm to Fortress mesh"),
         Err(err) => warn!(%err, "Fortress publish failed (non-blocking)"),
+    }
+}
+
+#[cfg(test)]
+mod risk_tests {
+    use super::*;
+    #[test]
+    fn test_risk_alert_triggered() {
+        // angry face + attacking gesture should exceed 0.7
+        let risk = compute_perceptual_risk(Some(0.9), None, Some(1.0)).unwrap();
+        assert!(risk.alert, "angry+attacking should trigger alert");
+    }
+    #[test]
+    fn test_risk_normal_no_alert() {
+        let risk = compute_perceptual_risk(Some(0.1), Some(0.1), Some(0.0)).unwrap();
+        assert!(!risk.alert, "neutral face+calm voice should not alert");
+    }
+    #[test]
+    fn test_risk_single_modality_returns_none() {
+        let risk = compute_perceptual_risk(Some(0.9), None, None);
+        assert!(risk.is_none(), "single modality should return None");
     }
 }

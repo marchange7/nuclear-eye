@@ -209,7 +209,7 @@ async fn handle_alert(
         )
     })?;
 
-    tracing::Span::current().record("alarm_id", &alarm.alarm_id.as_str());
+    tracing::Span::current().record("alarm_id", alarm.alarm_id.as_str());
 
     let triad = AffectTriad::from_alarm_event(&alarm);
     let action = decide(&triad, true);

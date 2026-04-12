@@ -133,7 +133,7 @@ pub fn embedding_to_bytes(embedding: &[f32]) -> Vec<u8> {
 ///
 /// Returns `None` if the byte slice length is not a multiple of 4.
 pub fn bytes_to_embedding(bytes: &[u8]) -> Option<Vec<f32>> {
-    if bytes.len() % 4 != 0 {
+    if !bytes.len().is_multiple_of(4) {
         return None;
     }
     Some(

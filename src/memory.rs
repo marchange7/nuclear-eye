@@ -136,6 +136,7 @@ impl SecurityMemory {
         Ok(())
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub fn record_decision(
         &self,
         timestamp_ms: u64,
@@ -250,5 +251,14 @@ impl SecurityMemory {
 
     pub fn buffered_count(&self) -> Result<u32> {
         self.conn.query_row("SELECT COUNT(*) FROM event_buffer", [], |r| r.get(0))
+    }
+
+    /// JJ1: Record operator feedback on an alarm decision.
+    pub fn record_false_alarm(&self, alarm_id: &str, confirmed_false: bool, note: &str) -> Result<()> {
+        self.conn.execute(
+            "INSERT INTO false_alarm_log (alarm_id, confirmed_false, note) VALUES (?1, ?2, ?3)",
+            rusqlite::params![alarm_id, confirmed_false as i32, note],
+        )?;
+        Ok(())
     }
 }

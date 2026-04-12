@@ -1,20 +1,20 @@
-/// actuator_agent — translates DecisionAction / AlarmLevel into MQTT commands
-/// for physical outputs (lights, buzzers, servo arms).
-///
-/// Env vars:
-///   ACTUATOR_BIND         bind address          (default: 127.0.0.1:8086; use BIND_HOST=0.0.0.0 for Docker/Jetson)
-///   ACTUATOR_MQTT_HOST    MQTT broker host       (default: 127.0.0.1)
-///   ACTUATOR_MQTT_PORT    MQTT broker port       (default: 1883)
-///   ACTUATOR_MQTT_PREFIX  topic prefix           (default: nuclear/actuator)
-///
-/// MQTT topics published:
-///   {prefix}/light        — "off" | "green" | "amber" | "blue" | "red"
-///   {prefix}/buzzer       — "off" | "on"
-///   {prefix}/arm          — JSON {"action":"...", "level":"...", "camera_id":"..."}
-///
-/// REST endpoint:
-///   POST /actuate         — body: ActuateRequest
-///   GET  /health
+//! actuator_agent — translates DecisionAction / AlarmLevel into MQTT commands
+//! for physical outputs (lights, buzzers, servo arms).
+//!
+//! Env vars:
+//!   ACTUATOR_BIND         bind address          (default: 127.0.0.1:8086; use BIND_HOST=0.0.0.0 for Docker/Jetson)
+//!   ACTUATOR_MQTT_HOST    MQTT broker host       (default: 127.0.0.1)
+//!   ACTUATOR_MQTT_PORT    MQTT broker port       (default: 1883)
+//!   ACTUATOR_MQTT_PREFIX  topic prefix           (default: nuclear/actuator)
+//!
+//! MQTT topics published:
+//!   {prefix}/light        — "off" | "green" | "amber" | "blue" | "red"
+//!   {prefix}/buzzer       — "off" | "on"
+//!   {prefix}/arm          — JSON {"action":"...", "level":"...", "camera_id":"..."}
+//!
+//! REST endpoint:
+//!   POST /actuate         — body: ActuateRequest
+//!   GET  /health
 
 use anyhow::Result;
 use axum::{

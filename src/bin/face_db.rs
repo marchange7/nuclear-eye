@@ -286,19 +286,20 @@ async fn gdpr_export_faces(State(state): State<AppState>) -> Json<serde_json::Va
         Err(e) => return Json(serde_json::json!({"error": e.to_string()})),
     };
 
-    let rows: Vec<serde_json::Value> = stmt
-        .query_map([], |row| {
-            Ok(serde_json::json!({
-                "name":             row.get::<_, String>(0)?,
-                "embedding_hint":   row.get::<_, String>(1)?,
-                "authorized":       row.get::<_, i64>(2)? != 0,
-                "created_at":       row.get::<_, Option<i64>>(3)?,
-                "last_matched_at":  row.get::<_, Option<i64>>(4)?,
-            }))
-        })
-        .unwrap_or_else(|_| Box::new(std::iter::empty()))
-        .filter_map(|r| r.ok())
-        .collect();
+    let rows: Vec<serde_json::Value> = match stmt.query_map([], |row| {
+        Ok(serde_json::json!({
+            "name":             row.get::<_, String>(0)?,
+            "embedding_hint":   row.get::<_, String>(1)?,
+            "authorized":       row.get::<_, i64>(2)? != 0,
+            "created_at":       row.get::<_, Option<i64>>(3)?,
+            "last_matched_at":  row.get::<_, Option<i64>>(4)?,
+        }))
+    }) {
+        Ok(mapped) => mapped.filter_map(|r| r.ok()).collect(),
+        Err(e) => {
+            return Json(serde_json::json!({"error": e.to_string()}));
+        }
+    };
 
     let total = rows.len();
     Json(serde_json::json!({
@@ -396,37 +397,39 @@ async fn search_by_image(
         }
     };
 
-    // Step 2: load all stored embeddings + face metadata
-    let conn = state.conn.lock().await;
-    let mut stmt = match conn.prepare(
-        "SELECT fe.face_name, fe.embedding, f.embedding_hint, f.authorized
-         FROM face_embeddings fe
-         JOIN faces f ON f.name = fe.face_name
-         ORDER BY fe.face_name",
-    ) {
-        Ok(s) => s,
-        Err(e) => {
-            tracing::warn!(error = %e, "search-by-image: DB query failed");
-            return Json(vec![]);
-        }
-    };
+    // Step 2: load all stored embeddings + face metadata (scoped so `Statement`/`Connection`
+    // are dropped before any later `.await` — rusqlite types are not `Send`).
+    let rows: Vec<(String, Vec<u8>, String, bool)> = {
+        let conn = state.conn.lock().await;
+        let mut stmt = match conn.prepare(
+            "SELECT fe.face_name, fe.embedding, f.embedding_hint, f.authorized
+             FROM face_embeddings fe
+             JOIN faces f ON f.name = fe.face_name
+             ORDER BY fe.face_name",
+        ) {
+            Ok(s) => s,
+            Err(e) => {
+                tracing::warn!(error = %e, "search-by-image: DB query failed");
+                return Json(vec![]);
+            }
+        };
 
-    let rows: Vec<(String, Vec<u8>, String, bool)> = match stmt.query_map([], |row| {
-        Ok((
-            row.get::<_, String>(0)?,
-            row.get::<_, Vec<u8>>(1)?,
-            row.get::<_, String>(2)?,
-            row.get::<_, i64>(3)? != 0,
-        ))
-    }) {
-        Ok(mapped) => mapped.filter_map(|r| r.ok()).collect(),
-        Err(e) => {
-            tracing::warn!(error = %e, "search-by-image: failed to iterate embeddings");
-            vec![]
-        }
+        let collected: Vec<(String, Vec<u8>, String, bool)> = match stmt.query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, Vec<u8>>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, i64>(3)? != 0,
+            ))
+        }) {
+            Ok(mapped) => mapped.filter_map(|r| r.ok()).collect(),
+            Err(e) => {
+                tracing::warn!(error = %e, "search-by-image: failed to iterate embeddings");
+                vec![]
+            }
+        };
+        collected
     };
-    drop(stmt);
-    drop(conn);
 
     // Step 3: cosine similarity ranking
     let threshold = 0.28f32; // ArcFace same-person threshold

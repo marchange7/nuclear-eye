@@ -29,6 +29,12 @@ pub struct IPhoneSensorData {
     pub lidar_available: bool,
     /// "normal" | "limited" | "not_available"
     pub tracking_quality: String,
+    /// FastVLM scene caption from nuclear-scout (optional).
+    #[serde(default)]
+    pub vlm_caption: Option<String>,
+    /// VLM model identifier (e.g. "FastVLM-0.5B").
+    #[serde(default)]
+    pub vlm_model: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -40,6 +46,40 @@ pub struct PedestrianSummary {
     pub is_using_phone: bool,
     pub confidence: f64,
     pub identity: Option<String>,
+}
+
+/// JJ6: Depth blob from LiDAR point-cloud segmentation.
+///
+/// Each blob corresponds to one detected object in the scene.
+/// `height` is the estimated object height in metres — values < 0.5m
+/// indicate a small animal (cat/pet) rather than a person.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct DepthBlob {
+    pub distance_m: f32,
+    pub height: f32,
+    pub grid_x: i32,
+    pub grid_y: i32,
+}
+
+/// JJ6: LiDAR depth context attached to an ingest event by nuclear-scout.
+///
+/// All fields are optional — depth context is only present when Scout sends
+/// a `depth_summary` alongside the vision event.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct DepthContext {
+    /// Distance to the nearest detected object in metres.
+    pub distance_m: Option<f32>,
+    /// Room type tag derived from room classification model ("living_room", "bedroom", …).
+    pub room_type: Option<String>,
+    /// Number of distinct human-sized occupants detected by depth segmentation.
+    pub occupant_count: Option<i32>,
+    /// True when the depth model detected a fall event (sudden horizontal blob).
+    pub fall_detected: Option<bool>,
+    /// Interpersonal distance zone per Edward Hall proxemics:
+    ///   "intimate" (< 0.45m) | "personal" (0.45–1.2m) | "social" (1.2–3.6m) | "projected" (> 3.6m)
+    pub alert_zone: Option<String>,
+    /// All segmented blobs in the depth frame.
+    pub blobs: Option<Vec<DepthBlob>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -58,6 +98,11 @@ pub struct VisionEvent {
     pub extra_tags: Vec<String>,
     #[serde(default)]
     pub vlm_caption: Option<String>,
+    /// JJ6: Optional LiDAR depth context from nuclear-scout.
+    /// When present, depth-aware scoring adjusts the danger score before
+    /// AlarmLevel classification.
+    #[serde(default)]
+    pub depth_context: Option<DepthContext>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -107,6 +152,12 @@ pub struct AlarmGrader {
     pub recent_events: VecDeque<AlarmEvent>,
     pub hysteresis_window: usize,
     pub danger_thresholds: [f64; 3],
+}
+
+impl Default for AlarmGrader {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl AlarmGrader {
@@ -796,6 +847,7 @@ pub fn caption_to_vision_event(camera_id: &str, caption: &str, timestamp_ms: u64
         object_held,
         extra_tags,
         vlm_caption: Some(caption.to_string()),
+        depth_context: None,
     }
 }
 
@@ -842,6 +894,7 @@ mod tests {
             object_held: None,
             extra_tags: vec![],
             vlm_caption: None,
+            depth_context: None,
         };
         let t = AffectTriad::from_vision_event(&event);
         // High risk + high stress → low judgement
@@ -960,6 +1013,7 @@ mod tests {
             object_held: None,
             extra_tags: vec![],
             vlm_caption: None,
+            depth_context: None,
         }
     }
 

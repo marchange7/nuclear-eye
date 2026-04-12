@@ -3,9 +3,18 @@ name = "nuclear-eye"
 version = "0.1.0"
 edition = "2021"
 
+[features]
+default = []
+# RTSP capture in vision_agent (requires system OpenCV; see vision_agent.rs).
+opencv = ["dep:opencv"]
+
 [lib]
 name = "nuclear_eye"
 path = "src/lib.rs"
+
+[[bin]]
+name = "camera_server"
+path = "src/bin/camera_server.rs"
 
 [[bin]]
 name = "vision_agent"
@@ -67,6 +76,7 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["fmt", "env-filter"] }
 uuid = { version = "1.8", features = ["v4", "serde"] }
 rumqttc = { version = "0.24", default-features = false, features = ["use-rustls"] }
+opencv = { version = "0.93", optional = true }
 
 [profile.release]
 lto = true

@@ -205,7 +205,7 @@ async fn handle_decide(
         )
     })?;
 
-    tracing::Span::current().record("event_id", &req.event.event_id.as_str());
+    tracing::Span::current().record("event_id", req.event.event_id.as_str());
 
     let triad = AffectTriad::from_vision_event(&req.event);
     let is_safety_critical = req

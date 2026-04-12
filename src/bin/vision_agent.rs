@@ -276,26 +276,28 @@ async fn flush_buffer(client: &Client, target_url: &str, memory: &Arc<Mutex<Secu
 }
 
 fn build_event(index: u64, camera_id: &str) -> VisionEvent {
-    let person_detected = index % 3 != 0;
-    let known = index % 5 == 0;
+    let person_detected = !index.is_multiple_of(3);
+    let known = index.is_multiple_of(5);
+    let quad = index.is_multiple_of(4);
     VisionEvent {
         event_id: Uuid::new_v4().to_string(),
         timestamp_ms: now_ms(),
         camera_id: camera_id.to_string(),
-        behavior: if index % 4 == 0 { "loitering".into() } else { "passby".into() },
-        risk_score: if index % 4 == 0 { 0.78 } else { 0.34 },
-        stress_level: if index % 4 == 0 { 0.72 } else { 0.28 },
-        confidence: if index % 4 == 0 { 0.81 } else { 0.94 },
+        behavior: if quad { "loitering".into() } else { "passby".into() },
+        risk_score: if quad { 0.78 } else { 0.34 },
+        stress_level: if quad { 0.72 } else { 0.28 },
+        confidence: if quad { 0.81 } else { 0.94 },
         person_detected,
         person_name: if known { Some("known-resident".into()) } else { None },
-        hands_visible: if index % 2 == 0 { 2 } else { 1 },
-        object_held: if index % 7 == 0 { Some("unknown_object".into()) } else { None },
-        extra_tags: if index % 4 == 0 {
+        hands_visible: if index.is_multiple_of(2) { 2 } else { 1 },
+        object_held: if index.is_multiple_of(7) { Some("unknown_object".into()) } else { None },
+        extra_tags: if quad {
             vec!["repeat_pass".into(), "attention_house".into(), "synthetic".into()]
         } else {
             vec!["normal_motion".into(), "synthetic".into()]
         },
         vlm_caption: None,
+        depth_context: None,
     }
 }
 
