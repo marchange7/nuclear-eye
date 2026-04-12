@@ -34,7 +34,12 @@ SER_URL    = os.getenv("SER_URL",    "http://127.0.0.1:8105")
 VISION_URL = os.getenv("VISION_URL", "http://127.0.0.1:8090")
 
 # Y6: Fail-closed wrapper guard
-WRAPPER_URL = os.getenv("NUCLEAR_WRAPPER_URL", "http://localhost:9090")
+# Unset → default localhost (guard on). Explicit empty string → guard off (dev only).
+WRAPPER_URL = (
+    os.environ["NUCLEAR_WRAPPER_URL"].strip()
+    if "NUCLEAR_WRAPPER_URL" in os.environ
+    else "http://localhost:9090"
+)
 WRAPPER_POLL_INTERVAL_SECS = 60
 
 RISK_ALERT_THRESHOLD = float(os.getenv("RISK_ALERT_THRESHOLD", "0.7"))
@@ -46,7 +51,11 @@ _perceive_degraded = False
 async def check_wrapper_health():
     """Y6: Verify nuclear-wrapper is reachable before serving. Skip if WRAPPER_URL is empty."""
     if not WRAPPER_URL:
-        print("[perceive] NUCLEAR_WRAPPER_URL unset — skipping wrapper guard (dev mode)", flush=True)
+        print(
+            "[perceive] CRITICAL: NUCLEAR_WRAPPER_URL is empty — wrapper guard DISABLED. "
+            "Do not expose this endpoint on untrusted networks; set NUCLEAR_WRAPPER_URL in production.",
+            flush=True,
+        )
         return
     try:
         r = await httpx.AsyncClient().get(f"{WRAPPER_URL}/health", timeout=5.0)
