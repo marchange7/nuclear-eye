@@ -185,10 +185,10 @@ def _embed(image_b64: str, max_faces: int = 1) -> tuple[list[list[float]], list[
 # ── JJ3: La Rivière face event ────────────────────────────────────────────────
 
 
-def _emit_face_event(name: str, authorized: bool, similarity: float, camera_id: str = "registration"):
-    """JJ3: Fire-and-forget face event to La Rivière (fortress /v1/events)."""
-    import threading
-
+def _post_sentinelle_face_event(
+    name: str, authorized: bool, similarity: float, camera_id: str = "registration"
+) -> bool:
+    """JJ3: POST sentinelle.face to fortress /v1/events. Returns True only on HTTP success."""
     fortress_url = os.getenv("FORTRESS_URL", "http://localhost:7700")
     payload = {
         "event_type": "sentinelle.face",
@@ -202,14 +202,12 @@ def _emit_face_event(name: str, authorized: bool, similarity: float, camera_id: 
             "ts": int(time.time() * 1000),
         },
     }
-
-    def _post():
-        try:
-            requests.post(f"{fortress_url}/v1/events", json=payload, timeout=0.5)
-        except Exception:
-            pass
-
-    threading.Thread(target=_post, daemon=True).start()
+    try:
+        r = requests.post(f"{fortress_url}/v1/events", json=payload, timeout=0.5)
+        return r.ok
+    except Exception as exc:
+        logger.warning("JJ3: sentinelle.face POST failed: %s", exc)
+        return False
 
 
 # ── GDPR purge ────────────────────────────────────────────────────────────────
@@ -389,20 +387,23 @@ async def register(req: RegisterRequest):
     JJ3: Notify La Rivière that a face identity was registered or updated in face_db.
 
     Called by the Rust face_db agent after a successful INSERT/UPSERT into the faces
-    table.  Emits a fire-and-forget sentinelle.face event to fortress /v1/events so
-    the event lands in La Rivière for the training pipeline.
+    table.  POSTs sentinelle.face to fortress /v1/events (short timeout); event_emitted
+    reflects whether that HTTP call succeeded.
 
     The embedding itself is computed and stored by the Rust caller — this endpoint
     is purely the event bridge.
     """
-    _emit_face_event(
+    emitted = _post_sentinelle_face_event(
         name=req.name,
         authorized=req.authorized,
         similarity=req.similarity,
         camera_id=req.camera_id,
     )
-    logger.info("JJ3: sentinelle.face emitted for '%s' (authorized=%s)", req.name, req.authorized)
-    return RegisterResponse(ok=True, event_emitted=True)
+    if emitted:
+        logger.info("JJ3: sentinelle.face delivered for '%s' (authorized=%s)", req.name, req.authorized)
+    else:
+        logger.warning("JJ3: sentinelle.face not delivered for '%s'", req.name)
+    return RegisterResponse(ok=True, event_emitted=emitted)
 
 
 # ── Entrypoint ────────────────────────────────────────────────────────────────

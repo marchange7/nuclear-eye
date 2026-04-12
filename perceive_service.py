@@ -252,15 +252,21 @@ async def call_fer(session: aiohttp.ClientSession, frame_b64: str) -> Optional[d
         arr = arr.transpose(2, 0, 1)[np.newaxis]  # (1, 3, 224, 224)
 
         logits = _fer_session.run(None, {_fer_session.get_inputs()[0].name: arr})[0][0]
-        # softmax
-        exp_l = np.exp(logits - logits.max())
-        probs = exp_l / exp_l.sum()
+        probs = np.asarray(logits, dtype=np.float64).ravel()
+        if probs.size == 0:
+            return None
+        # softmax (stable)
+        exp_l = np.exp(probs - probs.max())
+        p = exp_l / exp_l.sum()
 
-        idx = int(probs.argmax())
-        n_cls = min(len(_fer_classes), len(probs))
-        emotion = _fer_classes[idx] if idx < n_cls else "neutral"
-        confidence = float(probs[idx]) if idx < len(probs) else 0.0
+        idx = int(p.argmax())
+        n_cls = min(len(_fer_classes), p.size)
+        # Model may output more logits than labels (or vice versa); never index past either.
+        emotion = _fer_classes[idx] if idx < len(_fer_classes) else "neutral"
+        confidence = float(p[idx]) if idx < p.size else 0.0
         valence, arousal = _FER_AFFECT.get(emotion, (0.0, 0.0))
+
+        all_probs = {_fer_classes[i]: round(float(p[i]), 4) for i in range(n_cls)}
 
         return {
             "emotion": emotion,
@@ -268,7 +274,7 @@ async def call_fer(session: aiohttp.ClientSession, frame_b64: str) -> Optional[d
             "valence": valence,
             "arousal": arousal,
             "source": "fer_onnx",
-            "all_probs": {_fer_classes[i]: round(float(probs[i]), 4) for i in range(n_cls)},
+            "all_probs": all_probs,
         }
     except Exception as e:
         print(f"[perceive] FER inference error: {e}", flush=True)
