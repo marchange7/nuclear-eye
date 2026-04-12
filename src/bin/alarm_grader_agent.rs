@@ -163,6 +163,11 @@ async fn main() -> Result<()> {
     let comms_api_token = std::env::var("COMMS_API_TOKEN").ok().filter(|s| !s.is_empty() && !s.starts_with("TODO"));
     let comms_alert_recipient = std::env::var("COMMS_ALERT_RECIPIENT").ok().filter(|s| s.starts_with('+'));
     let feedback_token = std::env::var("ALARM_GRADER_FEEDBACK_TOKEN").ok().filter(|s| !s.is_empty());
+    if feedback_token.is_none() {
+        warn!(
+            "ALARM_GRADER_FEEDBACK_TOKEN is not set — POST /feedback accepts unauthenticated requests; set the token in production"
+        );
+    }
 
     let state = AppState {
         grader: Arc::new(Mutex::new(grader)),
