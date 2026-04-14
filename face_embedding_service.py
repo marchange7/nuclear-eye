@@ -188,13 +188,15 @@ def _embed(image_b64: str, max_faces: int = 1) -> tuple[list[list[float]], list[
 def _post_sentinelle_face_event(
     name: str, authorized: bool, similarity: float, camera_id: str = "registration"
 ) -> bool:
-    """JJ3: POST sentinelle.face to fortress /v1/events. Returns True only on HTTP success."""
-    fortress_url = os.getenv("FORTRESS_URL", "http://localhost:7700")
-    payload = {
+    """JJ3: POST sentinelle.face to fortress /v1/events. Returns True only on HTTP success.
+    Uses FORTRESS_API_TOKEN as Bearer when set (aligned with riviere.rs post_domain_event).
+    """
+    fortress_url = os.getenv("FORTRESS_URL", "http://localhost:7700").strip()
+    payload: dict = {
         "event_type": "sentinelle.face",
         "source_domain": "sentinelle",
+        # Inner fields match riviere.rs `SentinelleFacePayload` (no extra keys).
         "payload": {
-            "source": "sentinelle-face",
             "camera_id": camera_id,
             "name": name,
             "authorized": authorized,
@@ -202,8 +204,20 @@ def _post_sentinelle_face_event(
             "ts": int(time.time() * 1000),
         },
     }
+    site_id = os.getenv("SITE_ID", "").strip()
+    if site_id:
+        payload["site_id"] = site_id
+    headers = {}
+    api_token = os.getenv("FORTRESS_API_TOKEN", "").strip()
+    if api_token:
+        headers["Authorization"] = f"Bearer {api_token}"
     try:
-        r = requests.post(f"{fortress_url}/v1/events", json=payload, timeout=0.5)
+        r = requests.post(
+            f"{fortress_url}/v1/events",
+            json=payload,
+            headers=headers,
+            timeout=0.5,
+        )
         return r.ok
     except Exception as exc:
         logger.warning("JJ3: sentinelle.face POST failed: %s", exc)

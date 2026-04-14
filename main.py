@@ -266,7 +266,16 @@ async def describe_frame(
         "image_b64": b64,
         "prompt": "Describe this scene briefly for security monitoring.",
     }
-    resp = await client.post(f"{fastvlm_url}/describe", json=payload, timeout=30.0)
+    headers = {}
+    fv_token = os.getenv("FASTVLM_API_TOKEN", "").strip()
+    if fv_token:
+        headers["Authorization"] = f"Bearer {fv_token}"
+    resp = await client.post(
+        f"{fastvlm_url}/describe",
+        json=payload,
+        headers=headers,
+        timeout=30.0,
+    )
     resp.raise_for_status()
     return resp.json().get("caption")
 
@@ -290,7 +299,16 @@ async def post_to_fortress(
     if face_emotion and face_emotion.get("face_detected"):
         payload["face_emotion"] = face_emotion["dominant"]
         payload["face_emotion_triad"] = face_emotion["triad"]
-    resp = await client.post(f"{fortress_url}/v1/mesh/vision", json=payload, timeout=10.0)
+    headers = {}
+    api_token = os.getenv("FORTRESS_API_TOKEN", "").strip()
+    if api_token:
+        headers["Authorization"] = f"Bearer {api_token}"
+    resp = await client.post(
+        f"{fortress_url}/v1/mesh/vision",
+        json=payload,
+        headers=headers,
+        timeout=10.0,
+    )
     resp.raise_for_status()
 
 

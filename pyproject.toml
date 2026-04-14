@@ -11,3 +11,7 @@ dependencies = [
     "requests>=2.31",
     "toml>=0.10",
 ]
+
+[project.optional-dependencies]
+# FER ONNX path in perceive_service.py (EfficientViT); CUDA wheels are environment-specific
+perceive-fer = ["onnxruntime>=1.17.0"]
