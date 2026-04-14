@@ -6,7 +6,8 @@
 //    nuclear-sdk. Used by alarm_grader_agent for the existing behavioural stream.
 //
 // 2. DOMAIN EVENTS (O7 / Q5): `post_domain_event()` — POST to Fortress
-//    /v1/events with the canonical `riviere.domain_events` schema:
+//    /v1/events with the canonical `riviere.domain_events` schema.
+//    When `FORTRESS_API_TOKEN` is non-empty, sends `Authorization: Bearer` (same as /v1/stream).
 //
 //      { event_type, source_domain, target_domain, session_id,
 //        payload, priority, status, site_id }
@@ -141,12 +142,16 @@ pub async fn post_domain_event(
         site_id: std::env::var("SITE_ID").ok(),
     };
 
-    let result = client
+    let api_token = std::env::var("FORTRESS_API_TOKEN").unwrap_or_default();
+    let mut req = client
         .post(&url)
         .json(&body)
-        .timeout(Duration::from_millis(DOMAIN_EVENT_TIMEOUT_MS))
-        .send()
-        .await;
+        .timeout(Duration::from_millis(DOMAIN_EVENT_TIMEOUT_MS));
+    let token = api_token.trim();
+    if !token.is_empty() {
+        req = req.bearer_auth(token);
+    }
+    let result = req.send().await;
 
     match result {
         Ok(resp) if resp.status().is_success() => {
@@ -244,7 +249,7 @@ pub struct SentinelleAlarmPayload {
 pub struct SentinelleFeedbackPayload {
     pub alarm_id: String,
     pub camera_id: String,
-    pub feedback: String,  // "false_alarm", "confirmed", "escalate"
+    pub feedback: String,  // "false_alarm", "confirmed", "escalate", "unclear"
     #[serde(skip_serializing_if = "Option::is_none")]
     pub operator: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]

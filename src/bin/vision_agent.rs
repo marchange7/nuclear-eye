@@ -337,11 +337,17 @@ async fn describe_image(fastvlm_url: &str, image_bytes: &[u8]) -> Option<String>
         "image_b64": b64,
         "prompt": "Describe this security camera frame in one sentence. Note people, behavior, and any unusual activity."
     });
-    let resp = reqwest::Client::new()
+    let api_token = std::env::var("FASTVLM_API_TOKEN").unwrap_or_default();
+    let token = api_token.trim();
+    let client = reqwest::Client::new();
+    let mut req = client
         .post(format!("{fastvlm_url}/describe"))
         .json(&body)
-        .timeout(Duration::from_millis(800))
-        .send().await.ok()?;
+        .timeout(Duration::from_millis(800));
+    if !token.is_empty() {
+        req = req.bearer_auth(token);
+    }
+    let resp = req.send().await.ok()?;
     let json: serde_json::Value = resp.json().await.ok()?;
     json["caption"].as_str().map(|s| s.to_string())
 }

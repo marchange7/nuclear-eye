@@ -11,6 +11,10 @@ Calls in parallel:
 Returns: PerceptualState JSON
 
 Port: 8091
+
+Optional FER ONNX (local model): install extras from repo root:
+  pip install -e ".[perceive-fer]"
+Then set FER_MODEL_PATH (and optional FER_CLASSES_PATH) to your ONNX + labels JSON.
 """
 import asyncio
 import base64

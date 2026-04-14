@@ -534,15 +534,17 @@ async fn process_event(
                 "value": value,
                 "timestamp": timestamp,
             });
+            let token = api_token.trim();
             for agent in &["arianne", "emile"] {
                 let url = format!("{fortress_url}/v1/agents/{agent}/memory");
-                let result = http
+                let mut req = http
                     .post(&url)
-                    .bearer_auth(&api_token)
                     .json(&payload)
-                    .timeout(std::time::Duration::from_millis(500))
-                    .send()
-                    .await;
+                    .timeout(std::time::Duration::from_millis(500));
+                if !token.is_empty() {
+                    req = req.bearer_auth(token);
+                }
+                let result = req.send().await;
                 match result {
                     Ok(r) if r.status().is_success() => {
                         tracing::debug!(agent = %agent, level = %level_str, "GG4: active_alarm memory pushed");
@@ -636,9 +638,12 @@ async fn process_event(
     // Fire-and-forget: chain publish never delays ingest or blocks the caller.
     {
         let chain_enabled = std::env::var("CHAIN_ENABLED")
-            .map(|v| v.to_lowercase() == "true")
+            .map(|v| v.trim().eq_ignore_ascii_case("true"))
             .unwrap_or(false);
-        let chain_url = std::env::var("NUCLEAR_CHAIN_URL").ok().filter(|s| !s.is_empty());
+        let chain_url = std::env::var("NUCLEAR_CHAIN_URL")
+            .ok()
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty());
 
         if chain_enabled {
             if let Some(chain_url) = chain_url {
@@ -649,7 +654,9 @@ async fn process_event(
                 let reason = alarm.note.clone();
                 let caption = alarm.vlm_caption.clone();
                 let ts = alarm.timestamp_ms;
-                let chain_token = std::env::var("NUCLEAR_CHAIN_TOKEN").ok()
+                let chain_token = std::env::var("NUCLEAR_CHAIN_TOKEN")
+                    .ok()
+                    .map(|s| s.trim().to_string())
                     .filter(|s| !s.is_empty());
 
                 tokio::spawn(async move {
@@ -669,7 +676,7 @@ async fn process_event(
                         .header("X-Chain-Target", "nuclear-watch")
                         .json(&payload)
                         .timeout(std::time::Duration::from_secs(2));
-                    if let Some(token) = chain_token {
+                    if let Some(ref token) = chain_token {
                         req = req.bearer_auth(token);
                     }
                     match req.send().await {
@@ -715,13 +722,15 @@ async fn process_event(
                 "confidence": confidence,
                 "ts": ts,
             });
-            let result = http
+            let token = api_token.trim();
+            let mut req = http
                 .post(format!("{fortress_url}/v1/stream"))
-                .bearer_auth(&api_token)
                 .json(&payload)
-                .timeout(std::time::Duration::from_millis(500))
-                .send()
-                .await;
+                .timeout(std::time::Duration::from_millis(500));
+            if !token.is_empty() {
+                req = req.bearer_auth(token);
+            }
+            let result = req.send().await;
             match result {
                 Ok(r) if r.status().is_success() => {
                     tracing::debug!(camera_id = %cam_id, "sentinelle.alarm.verdict published to Fortress stream");
@@ -811,14 +820,16 @@ async fn process_event(
                 };
 
                 // Try SMS first, then Signal. Both are fire-and-forget; we log but never panic.
+                let comms_token = api_token.trim();
                 let sms_payload = serde_json::json!({ "to": recipient, "body": body });
-                let sms_result = http
+                let mut sms_req = http
                     .post(format!("{comms_url}/sms/send"))
-                    .bearer_auth(&api_token)
                     .json(&sms_payload)
-                    .timeout(std::time::Duration::from_secs(5))
-                    .send()
-                    .await;
+                    .timeout(std::time::Duration::from_secs(5));
+                if !comms_token.is_empty() {
+                    sms_req = sms_req.bearer_auth(comms_token);
+                }
+                let sms_result = sms_req.send().await;
 
                 match sms_result {
                     Ok(r) if r.status().is_success() => {
@@ -829,13 +840,14 @@ async fn process_event(
                         let status = r.status();
                         tracing::debug!(status = %status, "SMS unavailable, trying Signal");
                         let sig_payload = serde_json::json!({ "recipient": recipient, "message": body });
-                        let sig_result = http
+                        let mut sig_req = http
                             .post(format!("{comms_url}/signal/send"))
-                            .bearer_auth(&api_token)
                             .json(&sig_payload)
-                            .timeout(std::time::Duration::from_secs(5))
-                            .send()
-                            .await;
+                            .timeout(std::time::Duration::from_secs(5));
+                        if !comms_token.is_empty() {
+                            sig_req = sig_req.bearer_auth(comms_token);
+                        }
+                        let sig_result = sig_req.send().await;
                         match sig_result {
                             Ok(r) if r.status().is_success() => {
                                 info!(recipient = %recipient, "High-alarm Signal message sent via chain-comms");
@@ -1138,13 +1150,15 @@ async fn publish_to_mesh(alarm: &AlarmEvent, triad: &AffectTriad, decision: &str
         "context": alarm.vlm_caption.as_deref().unwrap_or_default(),
         "vision_source": "FastVLM-0.5B",
     });
-    let result = client
+    let token = api_token.trim();
+    let mut req = client
         .post(format!("{}/v1/mesh/security", fortress_url))
-        .bearer_auth(api_token)
         .json(&payload)
-        .timeout(std::time::Duration::from_millis(500))
-        .send()
-        .await;
+        .timeout(std::time::Duration::from_millis(500));
+    if !token.is_empty() {
+        req = req.bearer_auth(token);
+    }
+    let result = req.send().await;
     match result {
         Ok(resp) => info!(status = %resp.status(), "published alarm to Fortress mesh"),
         Err(err) => warn!(%err, "Fortress publish failed (non-blocking)"),
