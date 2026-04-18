@@ -9,6 +9,14 @@ use tokio::time::Duration;
 use tracing::{info, warn};
 use uuid::Uuid;
 
+fn hash_device_id(id: &str) -> String {
+    use std::collections::hash_map::DefaultHasher;
+    use std::hash::{Hash, Hasher};
+    let mut h = DefaultHasher::new();
+    id.hash(&mut h);
+    format!("{:016x}", h.finish())
+}
+
 const MAX_RETRIES: u32 = 3;
 const MAX_BUFFER_ATTEMPTS: i32 = 10;
 const FLUSH_INTERVAL_SECS: u64 = 30;
@@ -88,7 +96,7 @@ async fn handle_iphone_sensor(
     State(state): State<AppState>,
     Json(data): Json<IPhoneSensorData>,
 ) -> (StatusCode, Json<IngestResponse>) {
-    info!(device_id = %data.device_id, pedestrians = data.pedestrians.len(), "nuclear-scout data received");
+    info!(device_id_hash = %hash_device_id(&data.device_id), pedestrians = data.pedestrians.len(), "nuclear-scout data received");
 
     let events = iphone_to_vision_events(&data);
     let total = events.len();
