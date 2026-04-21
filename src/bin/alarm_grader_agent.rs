@@ -4,7 +4,9 @@ use std::time::Duration;
 use anyhow::Result;
 use chrono::Utc;
 use axum::{
+    body::Bytes,
     extract::{State, ws::{Message, WebSocket, WebSocketUpgrade}},
+    http::StatusCode,
     routing::{get, post},
     Json, Router,
 };
@@ -957,9 +959,10 @@ struct FeedbackRequest {
 async fn handle_feedback(
     State(state): State<AppState>,
     headers: axum::http::HeaderMap,
-    Json(req): Json<FeedbackRequest>,
-) -> (axum::http::StatusCode, Json<serde_json::Value>) {
-    // Bearer token guard — checked when ALARM_GRADER_FEEDBACK_TOKEN is configured.
+    body: Bytes,
+) -> (StatusCode, Json<serde_json::Value>) {
+    // Bearer token guard — runs BEFORE body deserialization so unauthenticated
+    // requests always get 401, never 422 from missing required fields.
     if let Some(ref expected) = state.feedback_token {
         let authorized = headers
             .get(axum::http::header::AUTHORIZATION)
@@ -967,13 +970,17 @@ async fn handle_feedback(
             .map(|v| v == format!("Bearer {expected}"))
             .unwrap_or(false);
         if !authorized {
-            warn!(alarm_id = %req.alarm_id, "feedback: unauthorized (missing or wrong token)");
+            warn!("feedback: unauthorized (missing or wrong token)");
             return (
-                axum::http::StatusCode::UNAUTHORIZED,
+                StatusCode::UNAUTHORIZED,
                 Json(serde_json::json!({ "error": "unauthorized" })),
             );
         }
     }
+    let req: FeedbackRequest = match serde_json::from_slice(&body) {
+        Ok(r) => r,
+        Err(e) => return (StatusCode::UNPROCESSABLE_ENTITY, Json(serde_json::json!({ "error": e.to_string() }))),
+    };
 
     if !FEEDBACK_ALLOWED.contains(&req.feedback.as_str()) {
         warn!(
