@@ -1,6 +1,13 @@
 use anyhow::{Context, Result};
-use axum::{extract::State, http::StatusCode, routing::{get, post}, Json, Router};
-use nuclear_eye::{now_ms, IPhoneSensorData, PedestrianSummary, SecurityConfig, VisionEvent};
+use axum::{
+    extract::State,
+    http::{HeaderMap, StatusCode},
+    routing::{get, post},
+    Json, Router,
+};
+use nuclear_eye::{
+    face_db_auth, now_ms, IPhoneSensorData, PedestrianSummary, SecurityConfig, VisionEvent,
+};
 use nuclear_eye::memory::SecurityMemory;
 use reqwest::Client;
 use serde::Serialize;
@@ -26,6 +33,33 @@ struct AppState {
     client: Arc<Client>,
     alarm_grader_url: String,
     memory: Arc<Mutex<SecurityMemory>>,
+    /// `IPHONE_SENSOR_TOKEN` at boot. `None` ⇒ open mode, parity with
+    /// `alarm_grader_agent` / `face_db`. Logged at startup.
+    ///
+    /// Closes `os/55` HIGH at the HTTP layer.
+    sensor_token: Option<Arc<String>>,
+    /// `KERNEL_REQUIRE_TENANT_HEADER` at boot. `false` ⇒ Pass 1a/1b
+    /// (missing `X-Tenant-Id` resolves to `kernel.legacy_default_tenant()`,
+    /// `os/57 §4.7`).
+    require_tenant_header: bool,
+}
+
+/// Standard auth + tenant guard. Reuses [`face_db_auth::authenticate`] with
+/// an agent-specific bearer token env (`IPHONE_SENSOR_TOKEN`).
+fn guard(
+    state: &AppState,
+    headers: &HeaderMap,
+) -> Result<face_db_auth::AuthContext, (StatusCode, Json<serde_json::Value>)> {
+    face_db_auth::authenticate(
+        headers,
+        state.sensor_token.as_deref().map(String::as_str),
+        state.require_tenant_header,
+    )
+    .map_err(face_db_auth::AuthError::into_response)
+}
+
+fn sensor_token_from_env() -> Option<String> {
+    std::env::var("IPHONE_SENSOR_TOKEN").ok().filter(|s| !s.is_empty())
 }
 
 #[derive(Debug, Serialize)]
@@ -68,6 +102,24 @@ async fn main() -> Result<()> {
         SecurityMemory::open(&memory_path).context("failed to open memory db")?
     ));
 
+    // os/56 P1-5 — wire bearer auth + multi-tenant header guard.
+    // IPHONE_SENSOR_TOKEN unset ⇒ open mode (parity with face_db / alarm_grader).
+    // KERNEL_REQUIRE_TENANT_HEADER=1 ⇒ Pass 1c strict (os/57 §4.7).
+    let sensor_token = sensor_token_from_env().map(Arc::new);
+    let require_tenant_header = face_db_auth::require_tenant_from_env();
+    if sensor_token.is_none() {
+        warn!(
+            "IPHONE_SENSOR_TOKEN is not set — POST /sensor/iphone accepts \
+             unauthenticated requests; set the token in production"
+        );
+    }
+    if !require_tenant_header {
+        info!(
+            "KERNEL_REQUIRE_TENANT_HEADER unset — Pass 1a/1b semantics (missing \
+             X-Tenant-Id resolves to legacy default tenant)"
+        );
+    }
+
     // Background: flush offline buffer every 30s
     let flush_client = client.clone();
     let flush_url = alarm_grader_url.clone();
@@ -79,7 +131,13 @@ async fn main() -> Result<()> {
         }
     });
 
-    let state = AppState { client, alarm_grader_url, memory };
+    let state = AppState {
+        client,
+        alarm_grader_url,
+        memory,
+        sensor_token,
+        require_tenant_header,
+    };
 
     let app = Router::new()
         .route("/sensor/iphone", post(handle_iphone_sensor))
@@ -94,28 +152,46 @@ async fn main() -> Result<()> {
 
 async fn handle_iphone_sensor(
     State(state): State<AppState>,
+    headers: HeaderMap,
     Json(data): Json<IPhoneSensorData>,
-) -> (StatusCode, Json<IngestResponse>) {
-    info!(device_id_hash = %hash_device_id(&data.device_id), pedestrians = data.pedestrians.len(), "nuclear-scout data received");
+) -> Result<(StatusCode, Json<IngestResponse>), (StatusCode, Json<serde_json::Value>)> {
+    let ctx = guard(&state, &headers)?;
+    info!(
+        tenant_id = %ctx.tenant_id,
+        device_id_hash = %hash_device_id(&data.device_id),
+        pedestrians = data.pedestrians.len(),
+        "nuclear-scout data received"
+    );
 
     let events = iphone_to_vision_events(&data);
     let total = events.len();
     let mut accepted = 0usize;
     let mut buffered = 0usize;
     let ingest_url = format!("{}/ingest", state.alarm_grader_url);
+    let tenant_str = ctx.tenant_id.to_string();
 
     for event in events {
-        if send_with_retry(&state.client, &ingest_url, &event, MAX_RETRIES).await {
+        if send_with_retry(&state.client, &ingest_url, &event, &tenant_str, MAX_RETRIES).await {
             accepted += 1;
-        } else {
-            if let Ok(json) = serde_json::to_string(&event) {
-                state.memory.lock().unwrap().buffer_event(&json, &ingest_url, now_ms()).ok();
-                buffered += 1;
-            }
+        } else if let Ok(json) = serde_json::to_string(&event) {
+            // os/56 P1-5: buffered events currently lose tenant attribution
+            // and are flushed under `kernel.legacy_default_tenant()`. The
+            // canonical fix lives in P1-7 (kernel-pg outbox table carrying
+            // tenant_id per row); the in-process SQLite buffer is intentionally
+            // not extended here to keep the change surface small.
+            state.memory.lock().unwrap().buffer_event(&json, &ingest_url, now_ms()).ok();
+            buffered += 1;
         }
     }
 
-    (StatusCode::OK, Json(IngestResponse { accepted, skipped: total - accepted - buffered, buffered }))
+    Ok((
+        StatusCode::OK,
+        Json(IngestResponse {
+            accepted,
+            skipped: total - accepted - buffered,
+            buffered,
+        }),
+    ))
 }
 
 /// GET /health — nuclear-watch uses this to verify the scout ingest agent is alive.
@@ -123,10 +199,23 @@ async fn health() -> (StatusCode, Json<serde_json::Value>) {
     (StatusCode::OK, Json(serde_json::json!({ "ok": true, "service": "iphone_sensor_agent" })))
 }
 
-async fn send_with_retry(client: &Client, url: &str, event: &VisionEvent, max_retries: u32) -> bool {
+async fn send_with_retry(
+    client: &Client,
+    url: &str,
+    event: &VisionEvent,
+    tenant_id: &str,
+    max_retries: u32,
+) -> bool {
     let mut delay_ms = 500u64;
     for attempt in 1..=max_retries {
-        match client.post(url).json(event).timeout(Duration::from_secs(5)).send().await {
+        match client
+            .post(url)
+            .header("X-Tenant-Id", tenant_id)
+            .json(event)
+            .timeout(Duration::from_secs(5))
+            .send()
+            .await
+        {
             Ok(r) if r.status().is_success() => { return true; }
             Ok(r) => warn!(status = %r.status(), attempt, "rejected"),
             Err(e) => warn!(error = %e, attempt, "send failed"),
@@ -140,6 +229,9 @@ async fn send_with_retry(client: &Client, url: &str, event: &VisionEvent, max_re
 }
 
 async fn flush_buffer(client: &Client, alarm_url: &str, memory: &Arc<Mutex<SecurityMemory>>) {
+    // os/56 P1-5: buffered events forward under the legacy default tenant —
+    // see the P1-7 outbox follow-up for proper per-row tenant tracking.
+    let tenant_str = face_db_auth::LEGACY_DEFAULT_TENANT.to_string();
     let ingest_url = format!("{alarm_url}/ingest");
     let pending = {
         memory
@@ -155,7 +247,14 @@ async fn flush_buffer(client: &Client, alarm_url: &str, memory: &Arc<Mutex<Secur
             Ok(e) => e,
             Err(_) => { memory.lock().unwrap().delete_buffered_event(id).ok(); continue; }
         };
-        match client.post(&target).json(&event).timeout(Duration::from_secs(5)).send().await {
+        match client
+            .post(&target)
+            .header("X-Tenant-Id", &tenant_str)
+            .json(&event)
+            .timeout(Duration::from_secs(5))
+            .send()
+            .await
+        {
             Ok(r) if r.status().is_success() => { memory.lock().unwrap().delete_buffered_event(id).ok(); }
             _ => {
                 let mem = memory.lock().unwrap();

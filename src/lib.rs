@@ -1,6 +1,8 @@
 pub mod audit;
 pub mod consul;
+pub mod face_db_auth;
 pub mod face_embedding;
+pub mod face_store;
 pub mod guard;
 pub mod house;
 pub mod memory;

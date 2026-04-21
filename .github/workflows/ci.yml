@@ -43,6 +43,9 @@ jobs:
       - name: Install minimal runtime deps
         run: pip install fastapi uvicorn httpx pillow toml numpy
 
+      - name: P4-7 gesture_pose mapping unit tests
+        run: python -m unittest test_gesture_pose_mapping -v
+
       - name: Syntax check — importable without heavy deps
         run: |
           python -c "

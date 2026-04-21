@@ -15,3 +15,4 @@ dependencies = [
 [project.optional-dependencies]
 # FER ONNX path in perceive_service.py (EfficientViT); CUDA wheels are environment-specific
 perceive-fer = ["onnxruntime>=1.17.0"]
+perceive-gesture = ["mediapipe>=0.10.14"]

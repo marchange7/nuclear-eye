@@ -7,6 +7,11 @@ edition = "2021"
 default = []
 # RTSP capture in vision_agent (requires system OpenCV; see vision_agent.rs).
 opencv = ["dep:opencv"]
+# os/56 P1-4 Pass 2: Postgres-backed face_db with pgcrypto column encryption,
+# tenant_id + RLS. Activates the `face_store::PostgresFaceStore` impl. When
+# disabled the binary still compiles and falls back to the legacy SQLite
+# backend on `cfg.app.face_db_path`.
+face_db_pg = ["dep:sqlx"]
 
 [lib]
 name = "nuclear_eye"
@@ -57,7 +62,7 @@ name = "actuator_agent"
 path = "src/bin/actuator_agent.rs"
 
 [dependencies]
-nuclear-sdk = { path = "../nuclear-sdk/crates/nuclear-sdk", default-features = false, features = ["fortress", "penny", "consul"] }
+nuclear-sdk = { path = "../nuclear-sdk/crates/nuclear-sdk", default-features = false, features = ["fortress", "penny", "consul", "chain"] }
 anyhow = "1.0"
 clap = { version = "4", features = ["derive", "env"] }
 nuclear-consul = { path = "../nuclear-consul" }
@@ -77,6 +82,12 @@ tracing-subscriber = { version = "0.3", features = ["fmt", "env-filter"] }
 uuid = { version = "1.8", features = ["v4", "serde"] }
 rumqttc = { version = "0.24", default-features = false, features = ["use-rustls"] }
 opencv = { version = "0.93", optional = true }
+# os/56 P1-4: constant-time bearer-token comparison for face_db_auth.
+subtle = "2"
+# os/56 P1-4 Pass 2 (gated by `face_db_pg` feature): Postgres backend for the
+# pgcrypto-encrypted biometric store. sqlx is already in the workspace tree
+# transitively via nuclear-wrapper-core, so this is dep-graph-cheap.
+sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio", "tls-rustls", "postgres", "uuid", "macros", "time"], optional = true }
 
 [profile.release]
 lto = true

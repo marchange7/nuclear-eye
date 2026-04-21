@@ -16,6 +16,8 @@ use tokio::sync::{broadcast, Mutex};
 use tracing::{info, warn};
 
 const CONSUL_TIMEOUT_MS: u64 = 80;
+/// Default Penny L1 timeout for High-alarm `query_penny` (override with `PENNY_GRADER_TIMEOUT_MS`).
+const DEFAULT_PENNY_GRADER_TIMEOUT_MS: u64 = 800;
 const WATCH_CHANNEL_CAP: usize = 64;
 const THREAT_KEYWORDS: &[&str] = &["person", "vehicle", "movement", "intrusion"];
 
@@ -24,6 +26,9 @@ const THREAT_KEYWORDS: &[&str] = &["person", "vehicle", "movement", "intrusion"]
 #[serde(tag = "type", rename_all = "snake_case")]
 enum WatchEvent {
     /// Alarm level decision — existing event type.
+    /// `degraded` is always serialized (`true`/`false`) for simple client parsers.
+    /// For **High** alarms: `true` when Penny L1 did not apply (see `process_event` comment).
+    /// For other levels: always `false`.
     Alarm {
         ts: u64,
         camera_id: String,
@@ -31,6 +36,7 @@ enum WatchEvent {
         score: f64,
         reason: String,
         caption: Option<String>,
+        degraded: bool,
     },
     /// Consul deliberation result — existing event type.
     Decision {
@@ -105,6 +111,8 @@ struct AppState {
     /// Set ALARM_GRADER_FEEDBACK_TOKEN to require authentication on the feedback endpoint.
     /// If unset, the endpoint is open (internal-only — bind behind a gateway or VPN).
     feedback_token: Option<String>,
+    /// `tokio::time::timeout` budget for Penny L1 on High alarms (`PENNY_GRADER_TIMEOUT_MS`, default 800).
+    penny_grader_timeout_ms: u64,
 }
 
 #[tokio::main]
@@ -169,6 +177,11 @@ async fn main() -> Result<()> {
         );
     }
 
+    let penny_grader_timeout_ms = std::env::var("PENNY_GRADER_TIMEOUT_MS")
+        .ok()
+        .and_then(|s| s.parse::<u64>().ok())
+        .unwrap_or(DEFAULT_PENNY_GRADER_TIMEOUT_MS);
+
     let state = AppState {
         grader: Arc::new(Mutex::new(grader)),
         consul,
@@ -182,6 +195,7 @@ async fn main() -> Result<()> {
         comms_api_token,
         comms_alert_recipient,
         feedback_token,
+        penny_grader_timeout_ms,
     };
 
     let app = Router::new()
@@ -311,8 +325,11 @@ async fn process_event(
         }
     }
 
+    // WebSocket `degraded` (High only): set when Penny L1 did not apply — see below.
+    let mut watch_alarm_degraded = false;
+
     // For High alarms, fire Consul deliberation and penny-brain in parallel.
-    // Consul gets up to CONSUL_TIMEOUT_MS; penny-brain gets 500ms.
+    // Consul gets up to CONSUL_TIMEOUT_MS; Penny L1 gets PENNY_GRADER_TIMEOUT_MS (default 800ms).
     // If neither replies in time, the local decision stands unchanged.
     let consul_note = if alarm.level == AlarmLevel::High {
         let question = format!(
@@ -327,10 +344,16 @@ async fn process_event(
         };
         let consul_handle = state.consul.query_async(&question);
 
+        let penny_timeout_ms = state.penny_grader_timeout_ms;
         let (penny_result, consul_result) = tokio::join!(
-            tokio::time::timeout(Duration::from_millis(500), penny_future),
+            tokio::time::timeout(Duration::from_millis(penny_timeout_ms), penny_future),
             tokio::time::timeout(Duration::from_millis(CONSUL_TIMEOUT_MS), consul_handle),
         );
+
+        // Penny L1 "applied" only when we got non-empty text within the timeout.
+        // `Err(_)` = timeout; `Ok(None)` = Penny error, empty trim, or inner failure (query_penny maps errors to None).
+        // Product: `degraded` reflects Penny L1 only — Consul timeout alone does not set `degraded` if Penny succeeded.
+        watch_alarm_degraded = !matches!(penny_result, Ok(Some(_)));
 
         let mut note = String::new();
 
@@ -585,6 +608,7 @@ async fn process_event(
         score: alarm.danger_score,
         reason: alarm.note.clone(),
         caption: alarm.vlm_caption.clone(),
+        degraded: watch_alarm_degraded,
     }) {
         let _ = state.watch_tx.send(json);
     }
@@ -1116,7 +1140,8 @@ pub struct PerceptualRisk {
 /// Inputs (all optional, 0.0 if absent):
 ///   face_negative:   (-valence + 1) / 2 × confidence  (from FER model)
 ///   voice_agitated:  sqrt(arousal+1/2 × neg_valence+1/2) × confidence
-///   gesture_threat:  attacking=1.0, approaching=0.7, loitering=0.5, fleeing=0.4, help_needed=0.3
+///   gesture_threat:  pre-scaled 0.0–1.0 from perceive (intent weights include
+///   `fast_approach` / `hands_raised` for P4-7 Scout→appliance mapping; see `perceive_service` / `gesture_pose_mapping.py`).
 ///
 /// Returns None if fewer than 2 modalities are present.
 pub fn compute_perceptual_risk(
