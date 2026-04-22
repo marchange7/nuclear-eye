@@ -36,6 +36,10 @@ async fn main() -> anyhow::Result<()> {
         .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
         .init();
 
+    // S-7: fail-closed wrapper probe — exits(1) if NUCLEAR_WRAPPER_URL is set
+    // but unreachable, or if WRAPPER_REQUIRED=1 and URL is absent.
+    nuclear_eye::wrapper_guard::check_wrapper("camera-server").await?;
+
     let camera_url = std::env::var("CAMERA_URL").ok().filter(|s| !s.is_empty());
     let fps: f64 = std::env::var("CAMERA_FPS")
         .ok()

@@ -33,6 +33,9 @@ struct Args {
 async fn main() -> Result<()> {
     tracing_subscriber::fmt::init();
 
+    // S-7: fail-closed wrapper probe
+    nuclear_eye::wrapper_guard::check_wrapper("house-sentinel").await?;
+
     // ── Nuclear wrapper — resilience sidecar ────────────────────────────
     match nuclear_wrapper::wrap!(
         node_id      = "house-sentinel",

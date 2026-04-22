@@ -23,6 +23,9 @@ async fn main() -> Result<()> {
         .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
         .init();
 
+    // S-7: fail-closed wrapper probe
+    nuclear_eye::wrapper_guard::check_wrapper("safetyagent").await?;
+
     // ── Nuclear wrapper — resilience sidecar ────────────────────────────
     match nuclear_wrapper::wrap!(
         node_id      = "safetyagent",

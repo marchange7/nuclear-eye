@@ -123,6 +123,9 @@ async fn main() -> Result<()> {
         .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
         .init();
 
+    // S-7: fail-closed wrapper probe
+    nuclear_eye::wrapper_guard::check_wrapper("alarm-grader-agent").await?;
+
     // ── Nuclear wrapper — resilience sidecar ────────────────────────────
     match nuclear_wrapper::wrap!(
         node_id      = "alarm-grader-agent",
@@ -1171,6 +1174,16 @@ pub fn compute_perceptual_risk(
     })
 }
 
+// TODO(SEN-6): wrapper fail-closed — alarm_grader_agent runs unguarded when nuclear-wrapper
+//              is unreachable; fail-closed mode required for production — see os/PLAN2.md §8
+// TODO(SEN-9): audit log path (AUDIT_LOG_PATH) not validated at startup; missing parent dir
+//              causes silent audit gaps — validate or create at boot — see os/PLAN2.md §8
+// TODO(SEN-11): POST /feedback: alarm_id not validated against known alarms before recording;
+//               stale/forged alarm IDs silently accepted — see os/PLAN2.md §8
+// TODO(SEN-12): alarm verdict not written to sentinelle_alarms PG table; chain publish only.
+//               acknowledged_at / acknowledged_by columns not persisted — see os/PLAN2.md §8
+// TODO(SEN-13): perceptual_risk (face+voice+gesture fusion) not wired into alarm grading path;
+//               compute_perceptual_risk exists but grade_event ignores it — see os/PLAN2.md §8
 // TODO: replace with nk.fortress().ingest_security() once SecurityEvent type
 //       alignment with the fortress mesh endpoint is confirmed.
 async fn publish_to_mesh(alarm: &AlarmEvent, triad: &AffectTriad, decision: &str, fortress_url: &str, api_token: &str) {
