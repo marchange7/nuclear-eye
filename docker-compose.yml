@@ -24,8 +24,11 @@ services:
       BIND_HOST: "0.0.0.0"
     ports:
       - "9090:9090"
-    mem_limit: 128m
-    cpus: 0.25
+    deploy:
+      resources:
+        limits:
+          memory: 128m
+          cpus: "0.25"
     volumes:
       - ./:/workspace
     healthcheck:
@@ -49,8 +52,11 @@ services:
       NUCLEAR_WRAPPER_URL: "http://nuclear-wrapper:9090"
     ports:
       - "8780:8780"
-    mem_limit: 256m
-    cpus: 0.75
+    deploy:
+      resources:
+        limits:
+          memory: 256m
+          cpus: "0.75"
     volumes:
       - ./:/workspace
     depends_on:
@@ -75,8 +81,11 @@ services:
       NUCLEAR_WRAPPER_URL: "http://nuclear-wrapper:9090"
     ports:
       - "8081:8081"
-    mem_limit: 192m
-    cpus: 0.50
+    deploy:
+      resources:
+        limits:
+          memory: 192m
+          cpus: "0.50"
     volumes:
       - ./:/workspace
     depends_on:
@@ -105,8 +114,11 @@ services:
       ARCFACE_URL: "http://localhost:5555"
     ports:
       - "8087:8087"
-    mem_limit: 160m
-    cpus: 0.35
+    deploy:
+      resources:
+        limits:
+          memory: 160m
+          cpus: "0.35"
     volumes:
       - ./:/workspace
     depends_on:
@@ -134,8 +146,11 @@ services:
       NUCLEAR_WRAPPER_URL: "http://nuclear-wrapper:9090"
     ports:
       - "8085:8085"
-    mem_limit: 192m
-    cpus: 0.50
+    deploy:
+      resources:
+        limits:
+          memory: 192m
+          cpus: "0.50"
     volumes:
       - ./:/workspace
     depends_on:
@@ -164,8 +179,11 @@ services:
       NUCLEAR_WRAPPER_URL: "http://nuclear-wrapper:9090"
     ports:
       - "8086:8086"
-    mem_limit: 192m
-    cpus: 0.50
+    deploy:
+      resources:
+        limits:
+          memory: 192m
+          cpus: "0.50"
     volumes:
       - ./:/workspace
     depends_on:
@@ -195,8 +213,11 @@ services:
       # Q7: FastVLM ONNX local inference (Python nuclear-camera service)
       FASTVLM_ONNX_PATH: ${FASTVLM_ONNX_PATH:-/data/models/fastvlm/fastvlm.onnx}
       FASTVLM_DISABLED: ${FASTVLM_DISABLED:-false}
-    mem_limit: 192m
-    cpus: 0.50
+    deploy:
+      resources:
+        limits:
+          memory: 192m
+          cpus: "0.50"
     volumes:
       - ./:/workspace
       - /dev:/dev
