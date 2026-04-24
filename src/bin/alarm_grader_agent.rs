@@ -1,3 +1,4 @@
+use std::convert::Infallible;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -7,9 +8,12 @@ use axum::{
     body::Bytes,
     extract::{State, ws::{Message, WebSocket, WebSocketUpgrade}},
     http::StatusCode,
+    response::sse::{Event, KeepAlive, Sse},
     routing::{get, post},
     Json, Router,
 };
+use tokio_stream::wrappers::BroadcastStream;
+use tokio_stream::StreamExt as _;
 use nuclear_eye::{decide, riviere, AffectTriad, AlarmEvent, AlarmGrader, AlarmLevel, AlarmSummary, ConsulClient, SecurityConfig, VisionEvent};
 use nuclear_eye::memory::SecurityMemory;
 use nuclear_sdk::NuclearClient;
@@ -99,6 +103,8 @@ struct AppState {
     fortress_enabled: bool,
     memory: Arc<Mutex<SecurityMemory>>,
     watch_tx: broadcast::Sender<String>,
+    /// L2: SSE broadcast for `/debug/alarms` — each graded alarm as JSON.
+    debug_tx: Arc<broadcast::Sender<String>>,
     alert_lang: String,
     /// Shared HTTP client for La Rivière domain event POSTs (O7).
     http: reqwest::Client,
@@ -163,6 +169,8 @@ async fn main() -> Result<()> {
         .expect("failed to open security memory db");
 
     let (watch_tx, _) = broadcast::channel(WATCH_CHANNEL_CAP);
+    let (debug_tx_inner, _) = broadcast::channel::<String>(64);
+    let debug_tx = Arc::new(debug_tx_inner);
     let memory = Arc::new(Mutex::new(memory));
 
     let alert_lang = std::env::var("ALERT_LANG").unwrap_or_else(|_| "fr".to_string());
@@ -194,6 +202,7 @@ async fn main() -> Result<()> {
         fortress_enabled,
         memory: memory.clone(),
         watch_tx,
+        debug_tx,
         alert_lang,
         http,
         comms_url,
@@ -209,6 +218,7 @@ async fn main() -> Result<()> {
         .route("/feedback", post(handle_feedback))
         .route("/summary", get(summary))
         .route("/ws", get(ws_handler))
+        .route("/debug/alarms", get(debug_alarms_sse))
         .route("/health", get(alarm_health))
         .with_state(state);
 
@@ -423,8 +433,31 @@ async fn process_event(
         let conf     = alarm.danger_score as f32;
         let triad_a  = AffectTriad::from_alarm_event(&alarm);
         let action_s = decide(&triad_a, alarm.level == AlarmLevel::High).to_string();
+
+        // L2: broadcast to /debug/alarms SSE (fire-and-forget)
+        if state.debug_tx.receiver_count() > 0 {
+            let debug_evt = serde_json::json!({
+                "ts": nuclear_eye::now_ms(),
+                "camera_id": cam_id,
+                "behavior": behavior,
+                "level": verdict,
+                "score": conf,
+                "triad": {
+                    "judgement":     triad_a.judgement,
+                    "doubt":         triad_a.doubt,
+                    "determination": triad_a.determination,
+                },
+                "decision": action_s,
+            });
+            let _ = state.debug_tx.send(debug_evt.to_string());
+        }
+
+        let cam_id2   = cam_id.clone();
+        let behavior2 = behavior.clone();
+        let verdict2  = verdict.clone();
+        let action_s2 = action_s.clone();
         tokio::task::spawn_blocking(move || {
-            nuclear_eye::audit::log_decision(&cam_id, &behavior, &verdict, conf, &action_s);
+            nuclear_eye::audit::log_decision(&cam_id2, &behavior2, &verdict2, conf, &action_s2);
         });
     }
 
@@ -935,6 +968,24 @@ async fn summary(State(state): State<AppState>) -> Json<AlarmSummary> {
 /// GET /health — nuclear-watch polls this to verify the alarm grader / WebSocket host is alive.
 async fn alarm_health() -> (axum::http::StatusCode, Json<serde_json::Value>) {
     (axum::http::StatusCode::OK, Json(serde_json::json!({ "ok": true, "service": "alarm_grader_agent" })))
+}
+
+/// GET /debug/alarms — L2 SSE stream of every graded alarm with AffectTriad + decision.
+///
+/// Each event:
+/// ```json
+/// {"ts":…,"camera_id":"…","behavior":"…","level":"High","score":0.82,
+///  "triad":{"judgement":0.54,"doubt":0.37,"determination":0.71},"decision":"escalate"}
+/// ```
+async fn debug_alarms_sse(
+    State(state): State<AppState>,
+) -> Sse<impl tokio_stream::Stream<Item = Result<Event, Infallible>>> {
+    let rx = state.debug_tx.subscribe();
+    let stream = BroadcastStream::new(rx).filter_map(|msg| match msg {
+        Ok(json) => Some(Ok(Event::default().data(json))),
+        Err(_)   => None,
+    });
+    Sse::new(stream).keep_alive(KeepAlive::default())
 }
 
 // ── JJ1: Operator feedback endpoint ─────────────────────────────────────────

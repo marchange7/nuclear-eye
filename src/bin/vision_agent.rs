@@ -1,10 +1,19 @@
 use anyhow::{Context, Result};
-use axum::{routing::get, Router};
+use axum::{
+    extract::State,
+    response::sse::{Event, KeepAlive, Sse},
+    routing::get,
+    Router,
+};
 use nuclear_eye::{caption_to_vision_event, now_ms, SecurityConfig, VisionEvent};
 use nuclear_eye::memory::SecurityMemory;
 use reqwest::Client;
+use std::convert::Infallible;
 use std::sync::{Arc, Mutex};
+use tokio::sync::broadcast;
 use tokio::time::{sleep, Duration};
+use tokio_stream::wrappers::BroadcastStream;
+use tokio_stream::StreamExt as _;
 use tracing::{error, info, warn};
 use uuid::Uuid;
 
@@ -114,8 +123,10 @@ async fn main() -> Result<()> {
         }
     });
 
-    // Q4: health sidecar for Lucky7 doctor probes
-    // Binds on VISION_HEALTH_PORT (default 8090). Returns {"status":"ok"} on GET /health.
+    // Q4: health sidecar for Lucky7 doctor probes + L2 /debug/frames SSE
+    // Binds on VISION_HEALTH_PORT (default 8090).
+    let (debug_frames_tx, _) = broadcast::channel::<String>(64);
+    let debug_frames_tx = Arc::new(debug_frames_tx);
     {
         let health_port: u16 = std::env::var("VISION_HEALTH_PORT")
             .ok()
@@ -123,20 +134,29 @@ async fn main() -> Result<()> {
             .unwrap_or(8090);
         let bind_host = std::env::var("BIND_HOST").unwrap_or_else(|_| "127.0.0.1".into());
         let addr = format!("{bind_host}:{health_port}");
+        let debug_tx_route = debug_frames_tx.clone();
         let health_app = Router::new()
             .route("/health", get(|| async {
                 axum::Json(serde_json::json!({"status":"ok","service":"vision_agent"}))
+            }))
+            .route("/debug/frames", get(move || {
+                let rx = debug_tx_route.subscribe();
+                let stream = BroadcastStream::new(rx).filter_map(|msg| match msg {
+                    Ok(json) => Some(Ok::<Event, Infallible>(Event::default().data(json))),
+                    Err(_)   => None,
+                });
+                async move { Sse::new(stream).keep_alive(KeepAlive::default()) }
             }));
         match tokio::net::TcpListener::bind(&addr).await {
             Ok(listener) => {
-                info!("vision_agent health sidecar listening on {addr}");
+                info!("vision_agent sidecar listening on {addr} (health + /debug/frames)");
                 tokio::spawn(async move {
                     if let Err(e) = axum::serve(listener, health_app).await {
-                        warn!("vision_agent health sidecar error: {e}");
+                        warn!("vision_agent sidecar error: {e}");
                     }
                 });
             }
-            Err(e) => warn!("vision_agent: could not bind health sidecar on {addr}: {e}"),
+            Err(e) => warn!("vision_agent: could not bind sidecar on {addr}: {e}"),
         }
     }
 
@@ -226,6 +246,22 @@ async fn main() -> Result<()> {
                 event.timestamp_ms, &event.behavior, event.risk_score,
                 event.person_detected, event.person_name.as_deref(),
             );
+        }
+
+        // L2: broadcast to /debug/frames SSE
+        if debug_frames_tx.receiver_count() > 0 {
+            let debug_evt = serde_json::json!({
+                "ts": event.timestamp_ms,
+                "camera_id": event.camera_id,
+                "behavior": event.behavior,
+                "risk_score": event.risk_score,
+                "stress_level": event.stress_level,
+                "confidence": event.confidence,
+                "person_detected": event.person_detected,
+                "person_name": event.person_name,
+                "sent": sent,
+            });
+            let _ = debug_frames_tx.send(debug_evt.to_string());
         }
 
         sleep(tick).await;

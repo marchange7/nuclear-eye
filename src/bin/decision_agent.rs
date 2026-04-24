@@ -2,9 +2,14 @@ use anyhow::Result;
 use axum::{
     extract::State,
     http::StatusCode,
+    response::sse::{Event, KeepAlive, Sse},
     routing::{get, post},
     Json, Router,
 };
+use std::convert::Infallible;
+use tokio::sync::broadcast;
+use tokio_stream::wrappers::BroadcastStream;
+use tokio_stream::StreamExt as _;
 use nuclear_eye::{
     decide, AffectTriad, ConsulClient, DecisionAction, SecurityConfig, VisionEvent,
 };
@@ -27,6 +32,8 @@ struct AppState {
     consul: ConsulClient,
     memory: Arc<Mutex<SecurityMemory>>,
     nk: NuclearClient,
+    /// L2: SSE broadcast for `/debug/decisions`.
+    debug_tx: Arc<broadcast::Sender<String>>,
 }
 
 // ── Request / Response types ───────────────────────────────────────────
@@ -106,11 +113,15 @@ async fn main() -> Result<()> {
     std::fs::create_dir_all(std::path::Path::new(&memory_path).parent().unwrap())?;
     let memory = Arc::new(Mutex::new(SecurityMemory::open(&memory_path)?));
 
+    let (debug_tx_inner, _) = broadcast::channel::<String>(64);
+    let debug_tx = Arc::new(debug_tx_inner);
+
     let state = AppState {
         safety_risk_threshold: cfg.decision.safety_risk_threshold,
         consul,
         memory: memory.clone(),
         nk: nk.clone(),
+        debug_tx,
     };
 
     // ── Background health check via SDK ──────────────────────────────────
@@ -129,6 +140,7 @@ async fn main() -> Result<()> {
 
     let app = Router::new()
         .route("/decide", post(handle_decide))
+        .route("/debug/decisions", get(debug_decisions_sse))
         .route("/health", get(health))
         .with_state(state);
 
@@ -277,6 +289,27 @@ async fn handle_decide(
         "decision computed"
     );
 
+    // L2: broadcast to /debug/decisions SSE
+    if state.debug_tx.receiver_count() > 0 {
+        let debug_evt = serde_json::json!({
+            "ts": ts_ms,
+            "event_id": req.event.event_id,
+            "camera_id": req.event.camera_id,
+            "behavior": req.event.behavior,
+            "risk_score": req.event.risk_score,
+            "triad": {
+                "judgement":     triad.judgement,
+                "doubt":         triad.doubt,
+                "determination": triad.determination,
+            },
+            "action": action.to_string(),
+            "is_safety_critical": is_safety_critical,
+            "dominant": dominant,
+            "consul": consul_synthesis,
+        });
+        let _ = state.debug_tx.send(debug_evt.to_string());
+    }
+
     Ok(Json(DecisionResponse {
         event_id: req.event.event_id,
         triad,
@@ -286,4 +319,16 @@ async fn handle_decide(
         consul_synthesis,
         consul_confidence,
     }))
+}
+
+/// GET /debug/decisions — L2 SSE stream of each decision with AffectTriad + action.
+async fn debug_decisions_sse(
+    State(state): State<AppState>,
+) -> Sse<impl tokio_stream::Stream<Item = Result<Event, Infallible>>> {
+    let rx = state.debug_tx.subscribe();
+    let stream = BroadcastStream::new(rx).filter_map(|msg| match msg {
+        Ok(json) => Some(Ok(Event::default().data(json))),
+        Err(_)   => None,
+    });
+    Sse::new(stream).keep_alive(KeepAlive::default())
 }
