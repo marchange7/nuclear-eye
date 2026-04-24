@@ -387,6 +387,9 @@ fn iphone_to_vision_events(data: &IPhoneSensorData) -> Vec<VisionEvent> {
                 },
                 vlm_caption: data.vlm_caption.clone(),
                 depth_context: None,
+                face_negative: None,
+                voice_agitated: None,
+                gesture_threat: None,
             }
         })
         .collect()

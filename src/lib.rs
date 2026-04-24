@@ -106,6 +106,18 @@ pub struct VisionEvent {
     /// AlarmLevel classification.
     #[serde(default)]
     pub depth_context: Option<DepthContext>,
+    /// SEN-13: Face emotion signal — `(-valence + 1) / 2 × confidence` from FER model.
+    /// Present when the perception pipeline includes a facial affect analysis.
+    #[serde(default)]
+    pub face_negative: Option<f32>,
+    /// SEN-13: Voice agitation signal — `sqrt((arousal+1)/2 × (neg_valence+1)/2) × confidence`.
+    /// Present when Aurelia voice analysis is active.
+    #[serde(default)]
+    pub voice_agitated: Option<f32>,
+    /// SEN-13: Gesture threat score, pre-scaled 0.0–1.0 from perceive pipeline.
+    /// Includes `fast_approach` / `hands_raised` intent weights.
+    #[serde(default)]
+    pub gesture_threat: Option<f32>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -851,6 +863,9 @@ pub fn caption_to_vision_event(camera_id: &str, caption: &str, timestamp_ms: u64
         extra_tags,
         vlm_caption: Some(caption.to_string()),
         depth_context: None,
+        face_negative: None,
+        voice_agitated: None,
+        gesture_threat: None,
     }
 }
 
@@ -898,6 +913,9 @@ mod tests {
             extra_tags: vec![],
             vlm_caption: None,
             depth_context: None,
+        face_negative: None,
+        voice_agitated: None,
+        gesture_threat: None,
         };
         let t = AffectTriad::from_vision_event(&event);
         // High risk + high stress → low judgement
@@ -1017,6 +1035,9 @@ mod tests {
             extra_tags: vec![],
             vlm_caption: None,
             depth_context: None,
+        face_negative: None,
+        voice_agitated: None,
+        gesture_threat: None,
         }
     }
 

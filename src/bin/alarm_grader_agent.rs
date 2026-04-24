@@ -377,6 +377,46 @@ async fn process_event(
         }
     }
 
+    // SEN-13: Perceptual risk fusion — face/voice/gesture multi-modal amplification.
+    //
+    // Applied after JJ6 depth adjustment so both scoring layers are visible.
+    // When perceptual_risk fires (score > 0.7) AND the perceptual score exceeds
+    // the current danger_score, the blended score re-derives the alarm level and
+    // syncs the hysteresis window so future decisions reflect the true threat level.
+    if let Some(risk) = compute_perceptual_risk(
+        event.face_negative,
+        event.voice_agitated,
+        event.gesture_threat,
+    ) {
+        let pr_score = risk.score as f64;
+        if risk.alert && pr_score > alarm.danger_score {
+            let prev_level = alarm.level.clone();
+            alarm.danger_score = pr_score;
+            {
+                let mut grader = state.grader.lock().await;
+                alarm.level = grader.map_danger_to_level(pr_score);
+                // Keep hysteresis window consistent with the fused result.
+                if let Some(last) = grader.recent_events.back_mut() {
+                    last.level = alarm.level.clone();
+                    last.danger_score = alarm.danger_score;
+                }
+            }
+            if alarm.level != prev_level {
+                tracing::info!(
+                    event_id = %event.event_id,
+                    prev_level = %prev_level,
+                    new_level = %alarm.level,
+                    pr_score,
+                    "SEN-13: perceptual risk fusion escalated alarm level"
+                );
+            }
+            alarm.note.push_str(&format!(
+                " [perceptual_risk={:.2} face={:.2} voice={:.2} gesture={:.2}]",
+                risk.score, risk.face_contrib, risk.voice_contrib, risk.gesture_contrib,
+            ));
+        }
+    }
+
     // WebSocket `degraded` (High only): set when Penny L1 did not apply — see below.
     let mut watch_alarm_degraded = false;
 
@@ -1301,14 +1341,14 @@ pub fn compute_perceptual_risk(
     })
 }
 
-// SEN-9: DONE — audit log directory validated at startup (main).
+// SEN-9:  DONE — audit log directory validated at startup (main).
 // SEN-11: DONE — alarm_id validated against recent_alarm_ids window in handle_feedback.
+// SEN-13: DONE — perceptual_risk fusion wired into process_event after JJ6 depth adjustment;
+//                VisionEvent carries face_negative / voice_agitated / gesture_threat fields.
 // TODO(SEN-6): wrapper fail-closed — alarm_grader_agent runs unguarded when nuclear-wrapper
 //              is unreachable; fail-closed mode required for production — see os/PLAN2.md §8
 // TODO(SEN-12): alarm verdict not written to sentinelle_alarms PG table; chain publish only.
 //               acknowledged_at / acknowledged_by columns not persisted — see os/PLAN2.md §8
-// TODO(SEN-13): perceptual_risk (face+voice+gesture fusion) not wired into alarm grading path;
-//               compute_perceptual_risk exists but grade_event ignores it — see os/PLAN2.md §8
 // TODO: replace with nk.fortress().ingest_security() once SecurityEvent type
 //       alignment with the fortress mesh endpoint is confirmed.
 async fn publish_to_mesh(alarm: &AlarmEvent, triad: &AffectTriad, decision: &str, fortress_url: &str, api_token: &str) {

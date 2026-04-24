@@ -337,6 +337,9 @@ fn build_event(index: u64, camera_id: &str) -> VisionEvent {
         },
         vlm_caption: None,
         depth_context: None,
+        face_negative: None,
+        voice_agitated: None,
+        gesture_threat: None,
     }
 }
 
