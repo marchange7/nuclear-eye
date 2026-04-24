@@ -694,15 +694,15 @@ async fn process_event(
 
     // ── Q8: nuclear-chain dual-publish ────────────────────────────────────────────
     //
-    // When CHAIN_ENABLED=true and NUCLEAR_CHAIN_URL is set, POST the alarm verdict
+    // When CHAIN_ENABLED=true and NUCLEAR_CHAIN_COMMS_URL is set, POST the alarm verdict
     // to nuclear-chain /v1/events in addition to the existing WebSocket broadcast.
-    // Dual-publish during transition — existing WS path is always active.
+    // Dual-publish — existing WS path is always active.
     // Fire-and-forget: chain publish never delays ingest or blocks the caller.
     {
         let chain_enabled = std::env::var("CHAIN_ENABLED")
             .map(|v| v.trim().eq_ignore_ascii_case("true"))
             .unwrap_or(false);
-        let chain_url = std::env::var("NUCLEAR_CHAIN_URL")
+        let chain_url = std::env::var("NUCLEAR_CHAIN_COMMS_URL")
             .ok()
             .map(|s| s.trim().to_string())
             .filter(|s| !s.is_empty());
@@ -754,7 +754,7 @@ async fn process_event(
                     }
                 });
             } else {
-                tracing::debug!("Q8: CHAIN_ENABLED=true but NUCLEAR_CHAIN_URL not set — chain publish skipped");
+                tracing::debug!("Q8: CHAIN_ENABLED=true but NUCLEAR_CHAIN_COMMS_URL not set — chain publish skipped");
             }
         }
     }
