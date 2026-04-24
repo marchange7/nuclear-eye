@@ -1380,9 +1380,11 @@ mod risk_tests {
     use super::*;
     #[test]
     fn test_risk_alert_triggered() {
-        // angry face + attacking gesture should exceed 0.7
+        // angry face + attacking gesture should exceed 0.7 after normalization
         let risk = compute_perceptual_risk(Some(0.9), None, Some(1.0)).unwrap();
         assert!(risk.alert, "angry+attacking should trigger alert");
+        // score = (0.4*0.9 + 0.3*1.0) / 0.7 ≈ 0.943
+        assert!(risk.score > 0.7, "score should be above threshold: {}", risk.score);
     }
     #[test]
     fn test_risk_normal_no_alert() {
@@ -1393,5 +1395,28 @@ mod risk_tests {
     fn test_risk_single_modality_returns_none() {
         let risk = compute_perceptual_risk(Some(0.9), None, None);
         assert!(risk.is_none(), "single modality should return None");
+    }
+    #[test]
+    fn test_risk_all_three_modalities_not_suppressed() {
+        // Full 3-modality path: normalized weight sum = 1.0, no suppression
+        let risk = compute_perceptual_risk(Some(0.8), Some(0.8), Some(0.8)).unwrap();
+        // score = (0.4*0.8 + 0.3*0.8 + 0.3*0.8) / 1.0 = 0.8
+        assert!((risk.score - 0.8).abs() < 0.001, "3-modality score should be 0.8, got {}", risk.score);
+        assert!(risk.alert, "all high modalities should trigger alert");
+    }
+    #[test]
+    fn test_recent_alarm_window_eviction() {
+        // Ensure the VecDeque window evicts oldest entry when full.
+        let mut ids: VecDeque<String> = VecDeque::with_capacity(RECENT_ALARM_WINDOW);
+        for i in 0..RECENT_ALARM_WINDOW {
+            if ids.len() == RECENT_ALARM_WINDOW { ids.pop_front(); }
+            ids.push_back(format!("alarm-{i}"));
+        }
+        assert_eq!(ids.len(), RECENT_ALARM_WINDOW);
+        // Insert one more — alarm-0 should be evicted
+        ids.pop_front();
+        ids.push_back("alarm-overflow".to_string());
+        assert!(!ids.contains(&"alarm-0".to_string()), "oldest alarm should be evicted");
+        assert!(ids.contains(&"alarm-overflow".to_string()), "new alarm should be present");
     }
 }
