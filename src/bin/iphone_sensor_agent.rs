@@ -2,6 +2,7 @@ use anyhow::{Context, Result};
 use axum::{
     extract::State,
     http::{HeaderMap, StatusCode},
+    response::sse::{Event, KeepAlive, Sse},
     routing::{get, post},
     Json, Router,
 };
@@ -11,8 +12,12 @@ use nuclear_eye::{
 use nuclear_eye::memory::SecurityMemory;
 use reqwest::Client;
 use serde::Serialize;
+use std::convert::Infallible;
 use std::sync::{Arc, Mutex};
+use tokio::sync::broadcast;
 use tokio::time::Duration;
+use tokio_stream::wrappers::BroadcastStream;
+use tokio_stream::StreamExt as _;
 use tracing::{info, warn};
 use uuid::Uuid;
 
@@ -28,6 +33,9 @@ const MAX_RETRIES: u32 = 3;
 const MAX_BUFFER_ATTEMPTS: i32 = 10;
 const FLUSH_INTERVAL_SECS: u64 = 30;
 
+/// Ring-buffer capacity for `/debug/depth` SSE broadcast.
+const DEBUG_DEPTH_CHANNEL_CAP: usize = 64;
+
 #[derive(Clone)]
 struct AppState {
     client: Arc<Client>,
@@ -42,6 +50,8 @@ struct AppState {
     /// (missing `X-Tenant-Id` resolves to `kernel.legacy_default_tenant()`,
     /// `os/57 §4.7`).
     require_tenant_header: bool,
+    /// SSE broadcast for `/debug/depth` — each frame serialised as JSON.
+    debug_depth_tx: Arc<broadcast::Sender<String>>,
 }
 
 /// Standard auth + tenant guard. Reuses [`face_db_auth::authenticate`] with
@@ -134,16 +144,21 @@ async fn main() -> Result<()> {
         }
     });
 
+    let (debug_depth_tx, _) = broadcast::channel(DEBUG_DEPTH_CHANNEL_CAP);
+    let debug_depth_tx = Arc::new(debug_depth_tx);
+
     let state = AppState {
         client,
         alarm_grader_url,
         memory,
         sensor_token,
         require_tenant_header,
+        debug_depth_tx,
     };
 
     let app = Router::new()
         .route("/sensor/iphone", post(handle_iphone_sensor))
+        .route("/debug/depth", get(debug_depth_sse))
         .route("/health", get(health))
         .with_state(state);
 
@@ -187,6 +202,18 @@ async fn handle_iphone_sensor(
         }
     }
 
+    // L2: broadcast to /debug/depth SSE subscribers (fire-and-forget; lag tolerance = channel cap)
+    let debug_event = serde_json::json!({
+        "ts": now_ms(),
+        "device_id_hash": hash_device_id(&data.device_id),
+        "lidar_available": data.lidar_available,
+        "tracking_quality": data.tracking_quality,
+        "pedestrians": data.pedestrians.len(),
+        "accepted": accepted,
+        "buffered": buffered,
+    });
+    let _ = state.debug_depth_tx.send(debug_event.to_string());
+
     Ok((
         StatusCode::OK,
         Json(IngestResponse {
@@ -200,6 +227,28 @@ async fn handle_iphone_sensor(
 /// GET /health — nuclear-watch uses this to verify the scout ingest agent is alive.
 async fn health() -> (StatusCode, Json<serde_json::Value>) {
     (StatusCode::OK, Json(serde_json::json!({ "ok": true, "service": "iphone_sensor_agent" })))
+}
+
+/// GET /debug/depth — L2 debug SSE stream: ARKit depth frames and pedestrian events.
+///
+/// Each event is a JSON line:
+/// ```json
+/// {"ts":…,"device_id_hash":"…","lidar_available":true,"tracking_quality":"normal","pedestrians":2,"accepted":2,"buffered":0}
+/// ```
+///
+/// No auth — debug endpoints are local-only (BIND_HOST defaults to 127.0.0.1).
+/// Use `ncli capture iphone-sensor-agent` to stream from the mesh.
+async fn debug_depth_sse(
+    State(state): State<AppState>,
+) -> Sse<impl tokio_stream::Stream<Item = Result<Event, Infallible>>> {
+    let rx = state.debug_depth_tx.subscribe();
+    let stream = BroadcastStream::new(rx).filter_map(|msg| {
+        match msg {
+            Ok(json) => Some(Ok(Event::default().data(json))),
+            Err(_) => None, // lagged; skip
+        }
+    });
+    Sse::new(stream).keep_alive(KeepAlive::default())
 }
 
 async fn send_with_retry(
