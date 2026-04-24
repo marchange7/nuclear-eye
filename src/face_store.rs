@@ -90,13 +90,13 @@ impl FaceStore {
     pub async fn list_faces(&self, tenant: Uuid) -> Result<Vec<FaceRecord>> {
         match self {
             FaceStore::Sqlite(conn) => {
-                let _ = tenant; // single-tenant backend ignores tenant scope
+                let tenant_str = tenant.to_string();
                 let conn = conn.lock().await;
                 let mut stmt = conn
-                    .prepare("SELECT name, embedding_hint, authorized FROM faces ORDER BY name")
+                    .prepare("SELECT name, embedding_hint, authorized FROM faces WHERE tenant_id = ?1 ORDER BY name")
                     .context("prepare list_faces (sqlite)")?;
                 let rows = stmt
-                    .query_map([], |row| {
+                    .query_map(params![tenant_str], |row| {
                         Ok(FaceRecord {
                             name: row.get(0)?,
                             embedding_hint: row.get(1)?,
@@ -134,12 +134,12 @@ impl FaceStore {
     pub async fn find_face(&self, tenant: Uuid, name: &str) -> Result<Option<FaceRecord>> {
         match self {
             FaceStore::Sqlite(conn) => {
-                let _ = tenant;
+                let tenant_str = tenant.to_string();
                 let conn = conn.lock().await;
                 let mut stmt = conn
-                    .prepare("SELECT name, embedding_hint, authorized FROM faces WHERE name = ?1")
+                    .prepare("SELECT name, embedding_hint, authorized FROM faces WHERE name = ?1 AND tenant_id = ?2")
                     .context("prepare find_face (sqlite)")?;
-                let mut rows = stmt.query(params![name]).context("query find_face (sqlite)")?;
+                let mut rows = stmt.query(params![name, tenant_str]).context("query find_face (sqlite)")?;
                 if let Some(row) = rows.next().context("row iter find_face (sqlite)")? {
                     Ok(Some(FaceRecord {
                         name: row.get(0)?,
@@ -177,18 +177,18 @@ impl FaceStore {
     pub async fn upsert_face(&self, tenant: Uuid, rec: &FaceRecord) -> Result<bool> {
         match self {
             FaceStore::Sqlite(conn) => {
-                let _ = tenant;
+                let tenant_str = tenant.to_string();
                 let conn = conn.lock().await;
                 let now = unix_now();
                 let n = conn
                     .execute(
-                        "INSERT INTO faces(name, embedding_hint, authorized, created_at, last_matched_at)
-                         VALUES(?1, ?2, ?3, ?4, ?4)
-                         ON CONFLICT(name) DO UPDATE SET
+                        "INSERT INTO faces(tenant_id, name, embedding_hint, authorized, created_at, last_matched_at)
+                         VALUES(?1, ?2, ?3, ?4, ?5, ?5)
+                         ON CONFLICT(tenant_id, name) DO UPDATE SET
                            embedding_hint   = excluded.embedding_hint,
                            authorized       = excluded.authorized,
-                           last_matched_at  = ?4",
-                        params![rec.name, rec.embedding_hint, i64::from(rec.authorized), now],
+                           last_matched_at  = ?5",
+                        params![tenant_str, rec.name, rec.embedding_hint, i64::from(rec.authorized), now],
                     )
                     .context("upsert face (sqlite)")?;
                 Ok(n > 0)
@@ -229,16 +229,16 @@ impl FaceStore {
     ) -> Result<bool> {
         match self {
             FaceStore::Sqlite(conn) => {
-                let _ = tenant;
+                let tenant_str = tenant.to_string();
                 let conn = conn.lock().await;
                 let n = conn.execute(
-                    "INSERT INTO face_embeddings(face_name, embedding, dims)
-                     VALUES(?1, ?2, ?3)
-                     ON CONFLICT(face_name) DO UPDATE
+                    "INSERT INTO face_embeddings(tenant_id, face_name, embedding, dims)
+                     VALUES(?1, ?2, ?3, ?4)
+                     ON CONFLICT(tenant_id, face_name) DO UPDATE
                      SET embedding = excluded.embedding,
                          dims = excluded.dims,
                          updated_at = strftime('%s','now')",
-                    params![face_name, blob, dims as i64],
+                    params![tenant_str, face_name, blob, dims as i64],
                 );
                 Ok(matches!(n, Ok(x) if x > 0))
             }
@@ -283,18 +283,19 @@ impl FaceStore {
     pub async fn load_embeddings(&self, tenant: Uuid) -> Result<Vec<EmbeddingRow>> {
         match self {
             FaceStore::Sqlite(conn) => {
-                let _ = tenant;
+                let tenant_str = tenant.to_string();
                 let conn = conn.lock().await;
                 let mut stmt = conn
                     .prepare(
                         "SELECT fe.face_name, fe.embedding, f.embedding_hint, f.authorized
                            FROM face_embeddings fe
-                           JOIN faces f ON f.name = fe.face_name
+                           JOIN faces f ON f.name = fe.face_name AND f.tenant_id = fe.tenant_id
+                           WHERE fe.tenant_id = ?1
                            ORDER BY fe.face_name",
                     )
                     .context("prepare load_embeddings (sqlite)")?;
                 let rows = stmt
-                    .query_map([], |row| {
+                    .query_map(params![tenant_str], |row| {
                         Ok(EmbeddingRow {
                             name: row.get(0)?,
                             embedding: row.get(1)?,
@@ -349,12 +350,12 @@ impl FaceStore {
         }
         match self {
             FaceStore::Sqlite(conn) => {
-                let _ = tenant;
+                let tenant_str = tenant.to_string();
                 let conn = conn.lock().await;
                 for name in names {
                     let _ = conn.execute(
-                        "UPDATE faces SET last_matched_at = ?1 WHERE name = ?2",
-                        params![now_secs, name],
+                        "UPDATE faces SET last_matched_at = ?1 WHERE name = ?2 AND tenant_id = ?3",
+                        params![now_secs, name, tenant_str],
                     );
                 }
                 Ok(())
@@ -383,14 +384,15 @@ impl FaceStore {
     pub async fn purge_stale(&self, tenant: Uuid, cutoff_secs: i64) -> Result<u64> {
         match self {
             FaceStore::Sqlite(conn) => {
-                let _ = tenant;
+                let tenant_str = tenant.to_string();
                 let conn = conn.lock().await;
                 let n = conn
                     .execute(
                         "DELETE FROM faces
-                          WHERE (last_matched_at IS NULL AND created_at < ?1)
-                             OR last_matched_at < ?1",
-                        params![cutoff_secs],
+                          WHERE tenant_id = ?2
+                            AND ((last_matched_at IS NULL AND created_at < ?1)
+                             OR last_matched_at < ?1)",
+                        params![cutoff_secs, tenant_str],
                     )
                     .context("purge_stale (sqlite)")?;
                 Ok(n as u64)
@@ -419,16 +421,16 @@ impl FaceStore {
     pub async fn gdpr_export(&self, tenant: Uuid) -> Result<Vec<GdprRow>> {
         match self {
             FaceStore::Sqlite(conn) => {
-                let _ = tenant;
+                let tenant_str = tenant.to_string();
                 let conn = conn.lock().await;
                 let mut stmt = conn
                     .prepare(
                         "SELECT name, embedding_hint, authorized, created_at, last_matched_at
-                           FROM faces ORDER BY name",
+                           FROM faces WHERE tenant_id = ?1 ORDER BY name",
                     )
                     .context("prepare gdpr_export (sqlite)")?;
                 let rows = stmt
-                    .query_map([], |row| {
+                    .query_map(params![tenant_str], |row| {
                         Ok(GdprRow {
                             name: row.get(0)?,
                             embedding_hint: row.get(1)?,
@@ -559,8 +561,8 @@ mod tests {
     fn label_reports_active_backend() {
         let conn = Connection::open_in_memory().unwrap();
         conn.execute_batch(
-            "CREATE TABLE faces(name TEXT, embedding_hint TEXT, authorized INTEGER);
-             CREATE TABLE face_embeddings(face_name TEXT, embedding BLOB, dims INTEGER);",
+            "CREATE TABLE faces(name TEXT, embedding_hint TEXT, authorized INTEGER, tenant_id TEXT NOT NULL DEFAULT 'default');
+             CREATE TABLE face_embeddings(face_name TEXT, embedding BLOB, dims INTEGER, tenant_id TEXT NOT NULL DEFAULT 'default');",
         )
         .unwrap();
         let s = FaceStore::from_sqlite(conn);
@@ -573,18 +575,22 @@ mod tests {
         conn.execute_batch(
             "CREATE TABLE faces(
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
-                name TEXT NOT NULL UNIQUE,
+                tenant_id TEXT NOT NULL DEFAULT 'default',
+                name TEXT NOT NULL,
                 embedding_hint TEXT NOT NULL,
                 authorized INTEGER NOT NULL DEFAULT 0,
                 created_at INTEGER NOT NULL DEFAULT (strftime('%s','now')),
-                last_matched_at INTEGER
+                last_matched_at INTEGER,
+                UNIQUE(tenant_id, name)
              );
              CREATE TABLE face_embeddings(
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
-                face_name TEXT NOT NULL UNIQUE REFERENCES faces(name),
+                tenant_id TEXT NOT NULL DEFAULT 'default',
+                face_name TEXT NOT NULL,
                 embedding BLOB NOT NULL,
                 dims INTEGER NOT NULL DEFAULT 512,
-                updated_at INTEGER NOT NULL DEFAULT (strftime('%s','now'))
+                updated_at INTEGER NOT NULL DEFAULT (strftime('%s','now')),
+                UNIQUE(tenant_id, face_name)
              );",
         )
         .unwrap();

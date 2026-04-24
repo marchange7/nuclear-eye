@@ -494,6 +494,30 @@ fn init_sqlite(conn: &Connection) -> Result<()> {
             Err(e) => tracing::warn!(error = %e, "face_db migration warning (non-fatal)"),
         }
     }
+
+    // T-P1-15: tenant isolation — add tenant_id columns to both tables.
+    // Default 'default' provides backward-compat for existing single-tenant rows.
+    // After migration all queries filter/write tenant_id explicitly.
+    for sql in [
+        "ALTER TABLE faces ADD COLUMN tenant_id TEXT NOT NULL DEFAULT 'default'",
+        "ALTER TABLE face_embeddings ADD COLUMN tenant_id TEXT NOT NULL DEFAULT 'default'",
+    ] {
+        match conn.execute_batch(sql) {
+            Ok(_) => {}
+            Err(e) if e.to_string().contains("duplicate column") => {}
+            Err(e) => tracing::warn!(error = %e, "face_db tenant_id migration warning (non-fatal)"),
+        }
+    }
+    // Indexes to make per-tenant queries fast.
+    for sql in [
+        "CREATE INDEX IF NOT EXISTS idx_faces_tenant ON faces(tenant_id)",
+        "CREATE INDEX IF NOT EXISTS idx_face_embeddings_tenant ON face_embeddings(tenant_id, face_name)",
+    ] {
+        match conn.execute_batch(sql) {
+            Ok(_) => {}
+            Err(e) => tracing::warn!(error = %e, "face_db tenant index creation warning (non-fatal)"),
+        }
+    }
     Ok(())
 }
 

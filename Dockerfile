@@ -66,5 +66,12 @@ COPY --from=builder /build/nuclear-eye/target/release/actuator_agent       /usr/
 
 RUN mkdir -p /etc/nuclear /var/log/nuclear-eye
 
+# T-P1-21 — drop privileges. All nuclear-eye binaries run as nonroot.
+# Note: /etc/nuclear and /var/log/nuclear-eye are usually bind-mounted at
+# runtime; pre-create them here so the empty-mount case also works.
+RUN useradd --uid 10001 --system nonroot \
+    && chown -R nonroot:nonroot /etc/nuclear /var/log/nuclear-eye
+USER nonroot
+
 # No default ENTRYPOINT — docker-compose sets the binary via `command:`.
 # e.g. command: camera_server  →  exec /usr/local/bin/camera_server
