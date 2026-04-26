@@ -12,6 +12,8 @@ Group=crew
 WorkingDirectory=/data/git/nuclear-eye
 EnvironmentFile=-/home/crew/.config/nuclear-eye/env
 Environment=RUST_LOG=info
+Environment=NUCLEAR_WRAPPER_URL=http://127.0.0.1:9091
+Environment=WRAPPER_REQUIRED=1
 # Required env:
 #   HOUSE_JWT_TOKEN=<token>
 #   FORTRESS_BASE_URL=http://127.0.0.1:7710

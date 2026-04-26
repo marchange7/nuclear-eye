@@ -10,7 +10,8 @@
 //! Environment:
 //!   NUCLEAR_WRAPPER_URL  — HTTP base URL of the nuclear-wrapper sidecar
 //!                          (e.g. http://nuclear-wrapper:9090 or http://127.0.0.1:9090)
-//!   WRAPPER_REQUIRED     — set to "1" or "true" to fail even when URL is absent
+//!   WRAPPER_REQUIRED     — set to "1" or "true" to fail even when URL is absent;
+//!                          defaults to required when NUCLEAR_ENV=production
 //!   WRAPPER_PROBE_RETRIES — number of probe attempts (default: 3)
 //!   WRAPPER_PROBE_TIMEOUT_MS — per-attempt timeout ms (default: 3000)
 
@@ -31,12 +32,20 @@ fn parse_bool_env(key: &str) -> bool {
     )
 }
 
+fn wrapper_required_by_default() -> bool {
+    parse_bool_env("WRAPPER_REQUIRED")
+        || matches!(
+            std::env::var("NUCLEAR_ENV").unwrap_or_default().trim().to_ascii_lowercase().as_str(),
+            "prod" | "production"
+        )
+}
+
 /// Run at binary startup — blocks synchronously until the probe resolves or fails.
 ///
 /// Call this from within a `tokio::main` context.
 pub async fn check_wrapper(binary_name: &str) -> Result<()> {
     let wrapper_url = trim_env("NUCLEAR_WRAPPER_URL");
-    let wrapper_required = parse_bool_env("WRAPPER_REQUIRED");
+    let wrapper_required = wrapper_required_by_default();
 
     let retries: u32 = std::env::var("WRAPPER_PROBE_RETRIES")
         .ok()

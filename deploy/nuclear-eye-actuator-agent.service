@@ -12,7 +12,9 @@ WorkingDirectory=/data/git/nuclear-eye
 EnvironmentFile=-/home/crew/.config/nuclear-eye/env
 Environment=RUST_LOG=info
 Environment=HOUSE_SECURITY_CONFIG=/data/git/nuclear-eye/config/security.toml
-Environment=ACTUATOR_BIND=0.0.0.0:8086
+Environment=NUCLEAR_WRAPPER_URL=http://127.0.0.1:9091
+Environment=WRAPPER_REQUIRED=1
+Environment=ACTUATOR_BIND=127.0.0.1:8086
 Environment=ACTUATOR_MQTT_PORT=1883
 ExecStart=/data/git/nuclear-eye/target/release/actuator_agent
 Restart=on-failure
