@@ -150,7 +150,7 @@ async fn main() -> Result<()> {
             tracing::info!("nuclear-wrapper: armed (tamper, health, discovery)");
             std::mem::forget(nw);
         }
-        Err(e) => tracing::info!("nuclear-wrapper: start failed ({e}) — running unguarded"),
+        Err(e) => nuclear_eye::wrapper_guard::handle_wrap_failure("alarm-grader-agent", &e),
     }
 
     let cfg = SecurityConfig::load()?;
@@ -651,8 +651,11 @@ async fn process_event(
         let ts = alarm.timestamp_ms;
         tokio::spawn(async move {
             let fortress_url = std::env::var("FORTRESS_URL")
-                .unwrap_or_else(|_| "http://127.0.0.1:7700".to_string());
+                .unwrap_or_else(|_| "http://127.0.0.1:7700".to_string())
+                .trim_end_matches('/')
+                .to_string();
             let api_token = std::env::var("FORTRESS_API_TOKEN").unwrap_or_default();
+            let service_token = std::env::var("NUCLEAR_SERVICE_TOKEN").unwrap_or_default();
             let timestamp = chrono::Utc::now().to_rfc3339();
             let value = if is_active {
                 serde_json::json!({
@@ -673,6 +676,7 @@ async fn process_event(
                 "timestamp": timestamp,
             });
             let token = api_token.trim();
+            let nuclear_token = service_token.trim();
             for agent in &["arianne", "emile"] {
                 let url = format!("{fortress_url}/v1/agents/{agent}/memory");
                 let mut req = http
@@ -681,6 +685,9 @@ async fn process_event(
                     .timeout(std::time::Duration::from_millis(500));
                 if !token.is_empty() {
                     req = req.bearer_auth(token);
+                }
+                if !nuclear_token.is_empty() {
+                    req = req.header("X-Nuclear-Token", nuclear_token);
                 }
                 let result = req.send().await;
                 match result {
@@ -839,7 +846,7 @@ async fn process_event(
     // ── 3. Fortress mesh publish ────────────────────────────────────────────────
     //
     // 3a. Q2: Enforced sentinelle.alarm.verdict stream event (always attempted).
-    //     POSTs to FORTRESS_URL/v1/stream regardless of mesh_enabled flag so that
+    //     POSTs to FORTRESS_URL/v1/stream/event regardless of mesh_enabled flag so that
     //     La Rivière always receives the canonical verdict record.
     //     FORTRESS_URL and FORTRESS_API_TOKEN are read at event time (not cached at
     //     startup) so hot env-var changes in Docker / systemd take effect immediately.
@@ -851,23 +858,36 @@ async fn process_event(
         let ts = chrono::Utc::now().to_rfc3339();
         tokio::spawn(async move {
             let fortress_url = std::env::var("FORTRESS_URL")
-                .unwrap_or_else(|_| "http://127.0.0.1:7700".to_string());
+                .unwrap_or_else(|_| "http://127.0.0.1:7700".to_string())
+                .trim_end_matches('/')
+                .to_string();
             let api_token = std::env::var("FORTRESS_API_TOKEN")
                 .unwrap_or_default();
+            let service_token = std::env::var("NUCLEAR_SERVICE_TOKEN").unwrap_or_default();
             let payload = serde_json::json!({
-                "type": "sentinelle.alarm.verdict",
-                "camera_id": cam_id,
-                "verdict": verdict,
-                "confidence": confidence,
-                "ts": ts,
+                "agent_id": "nuclear-eye",
+                "surface": "sentinelle",
+                "event_type": "internal",
+                "content": "sentinelle.alarm.verdict",
+                "context": {
+                    "camera_id": cam_id,
+                    "verdict": verdict,
+                    "confidence": confidence,
+                    "ts": ts,
+                },
+                "schema_version": 1,
             });
             let token = api_token.trim();
+            let nuclear_token = service_token.trim();
             let mut req = http
-                .post(format!("{fortress_url}/v1/stream"))
+                .post(format!("{fortress_url}/v1/stream/event"))
                 .json(&payload)
                 .timeout(std::time::Duration::from_millis(500));
             if !token.is_empty() {
                 req = req.bearer_auth(token);
+            }
+            if !nuclear_token.is_empty() {
+                req = req.header("X-Nuclear-Token", nuclear_token);
             }
             let result = req.send().await;
             match result {
@@ -875,10 +895,10 @@ async fn process_event(
                     tracing::debug!(camera_id = %cam_id, "sentinelle.alarm.verdict published to Fortress stream");
                 }
                 Ok(r) => {
-                    warn!(status = %r.status(), camera_id = %cam_id, "Fortress /v1/stream non-success (non-blocking)");
+                    warn!(status = %r.status(), camera_id = %cam_id, "Fortress /v1/stream/event non-success (non-blocking)");
                 }
                 Err(e) => {
-                    warn!(error = %e, "Fortress /v1/stream unreachable — verdict not published (non-blocking)");
+                    warn!(error = %e, "Fortress /v1/stream/event unreachable — verdict not published (non-blocking)");
                 }
             }
         });
@@ -1353,6 +1373,7 @@ pub fn compute_perceptual_risk(
 //       alignment with the fortress mesh endpoint is confirmed.
 async fn publish_to_mesh(alarm: &AlarmEvent, triad: &AffectTriad, decision: &str, fortress_url: &str, api_token: &str) {
     let client = reqwest::Client::new();
+    let fortress_url = fortress_url.trim_end_matches('/');
     let payload = serde_json::json!({
         "alarm": alarm,
         "triad": triad,
@@ -1361,12 +1382,17 @@ async fn publish_to_mesh(alarm: &AlarmEvent, triad: &AffectTriad, decision: &str
         "vision_source": "FastVLM-0.5B",
     });
     let token = api_token.trim();
+    let service_token = std::env::var("NUCLEAR_SERVICE_TOKEN").unwrap_or_default();
+    let nuclear_token = service_token.trim();
     let mut req = client
-        .post(format!("{}/v1/mesh/security", fortress_url))
+        .post(format!("{fortress_url}/v1/mesh/security"))
         .json(&payload)
         .timeout(std::time::Duration::from_millis(500));
     if !token.is_empty() {
         req = req.bearer_auth(token);
+    }
+    if !nuclear_token.is_empty() {
+        req = req.header("X-Nuclear-Token", nuclear_token);
     }
     let result = req.send().await;
     match result {

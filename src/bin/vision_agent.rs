@@ -80,7 +80,7 @@ async fn main() -> Result<()> {
         signal_token = std::env::var("SIGNAL_TOKEN").unwrap_or_default()
     ) {
         Ok(nw) => { std::mem::forget(nw); }
-        Err(e) => tracing::info!("nuclear-wrapper: start failed ({e}) — running unguarded"),
+        Err(e) => nuclear_eye::wrapper_guard::handle_wrap_failure("vision-agent", &e),
     }
 
     let cfg = SecurityConfig::load()?;

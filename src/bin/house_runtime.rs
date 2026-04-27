@@ -20,7 +20,7 @@ async fn main() -> Result<()> {
             tracing::info!("nuclear-wrapper: armed (tamper, health, discovery)");
             std::mem::forget(nw);
         }
-        Err(e) => tracing::info!("nuclear-wrapper: start failed ({e}) — running unguarded"),
+        Err(e) => nuclear_eye::wrapper_guard::handle_wrap_failure("house-runtime", &e),
     }
 
     let fortress_base_url =

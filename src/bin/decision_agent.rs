@@ -92,7 +92,7 @@ async fn main() -> Result<()> {
             info!("nuclear-wrapper: armed (tamper, health, discovery)");
             std::mem::forget(nw);
         }
-        Err(e) => info!("nuclear-wrapper: start failed ({e}) — running unguarded"),
+        Err(e) => nuclear_eye::wrapper_guard::handle_wrap_failure("decision-agent", &e),
     }
 
     let cfg = SecurityConfig::load()?;

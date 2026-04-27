@@ -172,7 +172,7 @@ async fn main() -> Result<()> {
             tracing::info!("nuclear-wrapper: armed (tamper, health, discovery)");
             std::mem::forget(nw);
         }
-        Err(e) => tracing::warn!("nuclear-wrapper: start failed ({e}) — running unguarded"),
+        Err(e) => nuclear_eye::wrapper_guard::handle_wrap_failure("actuator-agent", &e),
     }
 
     let bind = std::env::var("ACTUATOR_BIND").unwrap_or_else(|_| {
