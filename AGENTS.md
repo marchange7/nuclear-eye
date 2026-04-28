@@ -1,3 +1,5 @@
+# Workspace router: read /Users/akietler/git/os/README_AGENT_START_HERE.md before any code change. Use its OS Doc Router; scan os/agent-comms/{NOW,HANDOFF,DECISIONS,BLOCKERS}.md first.
+
 # Nuclear Eye — Agent Rules
 
 ## Build Execution Policy (B450 Source of Truth)
