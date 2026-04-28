@@ -7,7 +7,8 @@
 //
 // 2. DOMAIN EVENTS (O7 / Q5): `post_domain_event()` — POST to Fortress
 //    /v1/events with the canonical `riviere.domain_events` schema.
-//    When `FORTRESS_API_TOKEN` is non-empty, sends `Authorization: Bearer` (same as /v1/stream).
+//    When `FORTRESS_API_TOKEN` is non-empty, sends `Authorization: Bearer`.
+//    When `NUCLEAR_SERVICE_TOKEN` is non-empty, sends `X-Nuclear-Token`.
 //
 //      { event_type, source_domain, target_domain, session_id,
 //        payload, priority, status, site_id }
@@ -32,7 +33,14 @@ const DEFAULT_FORTRESS_URL: &str = "http://localhost:7700";
 const DOMAIN_EVENT_TIMEOUT_MS: u64 = 500;
 
 fn fortress_url() -> String {
-    std::env::var("FORTRESS_URL").unwrap_or_else(|_| DEFAULT_FORTRESS_URL.to_string())
+    std::env::var("FORTRESS_URL")
+        .unwrap_or_else(|_| DEFAULT_FORTRESS_URL.to_string())
+        .trim_end_matches('/')
+        .to_string()
+}
+
+fn service_token() -> String {
+    std::env::var("NUCLEAR_SERVICE_TOKEN").unwrap_or_default()
 }
 
 // ── Domain event payload types (Q5) ──────────────────────────────────────────
@@ -150,6 +158,11 @@ pub async fn post_domain_event(
     let token = api_token.trim();
     if !token.is_empty() {
         req = req.bearer_auth(token);
+    }
+    let nuclear_token = service_token();
+    let nuclear_token = nuclear_token.trim();
+    if !nuclear_token.is_empty() {
+        req = req.header("X-Nuclear-Token", nuclear_token);
     }
     let result = req.send().await;
 
@@ -276,7 +289,7 @@ pub async fn emit_sentinelle_alarm(
         Ok(v) => v,
         Err(e) => { tracing::warn!(error = %e, "emit_sentinelle_alarm: serialize failed"); return; }
     };
-    post_domain_event(client, "sentinelle.alarm", "sentinelle", None, value).await;
+    post_domain_event(client, "sentinelle.alarm", "vision", None, value).await;
 }
 
 /// JJ1: Emit `sentinelle.feedback` to La Rivière.
@@ -288,7 +301,7 @@ pub async fn emit_sentinelle_feedback(
         Ok(v) => v,
         Err(e) => { tracing::warn!(error = %e, "emit_sentinelle_feedback: serialize failed"); return; }
     };
-    post_domain_event(client, "sentinelle.feedback", "sentinelle", None, value).await;
+    post_domain_event(client, "sentinelle.feedback", "vision", None, value).await;
 }
 
 /// JJ1: Emit `sentinelle.face` to La Rivière.
@@ -300,5 +313,5 @@ pub async fn emit_sentinelle_face(
         Ok(v) => v,
         Err(e) => { tracing::warn!(error = %e, "emit_sentinelle_face: serialize failed"); return; }
     };
-    post_domain_event(client, "sentinelle.face", "sentinelle", None, value).await;
+    post_domain_event(client, "sentinelle.face", "vision", None, value).await;
 }

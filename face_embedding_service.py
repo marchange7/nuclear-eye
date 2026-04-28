@@ -189,12 +189,12 @@ def _post_sentinelle_face_event(
     name: str, authorized: bool, similarity: float, camera_id: str = "registration"
 ) -> bool:
     """JJ3: POST sentinelle.face to fortress /v1/events. Returns True only on HTTP success.
-    Uses FORTRESS_API_TOKEN as Bearer when set (aligned with riviere.rs post_domain_event).
+    Uses FORTRESS_API_TOKEN as Bearer and NUCLEAR_SERVICE_TOKEN as X-Nuclear-Token when set.
     """
-    fortress_url = os.getenv("FORTRESS_URL", "http://localhost:7700").strip()
+    fortress_url = os.getenv("FORTRESS_URL", "http://localhost:7700").strip().rstrip("/")
     payload: dict = {
         "event_type": "sentinelle.face",
-        "source_domain": "sentinelle",
+        "source_domain": "vision",
         # Inner fields match riviere.rs `SentinelleFacePayload` (no extra keys).
         "payload": {
             "camera_id": camera_id,
@@ -211,6 +211,9 @@ def _post_sentinelle_face_event(
     api_token = os.getenv("FORTRESS_API_TOKEN", "").strip()
     if api_token:
         headers["Authorization"] = f"Bearer {api_token}"
+    service_token = os.getenv("NUCLEAR_SERVICE_TOKEN", "").strip()
+    if service_token:
+        headers["X-Nuclear-Token"] = service_token
     try:
         r = requests.post(
             f"{fortress_url}/v1/events",
