@@ -1,0 +1,48 @@
+# model-manifest.yml — nuclear-eye
+#
+# Sentinelle perception runtime (server-side). Same allowed_models as sentinelle/
+# because nuclear-eye IS the inference execution layer for Sentinelle.
+#
+# Doctrine:
+#   os/70 §2 — face_db is Sentinelle-only. No Arianne or Émile weights here.
+#   nuclear-eye is not customer-facing (no App Store listing).
+#   Raw frames are NEVER persisted (os/70 §3).
+#
+# Runtime target: Linux server (Docker, ONNX Runtime).
+
+product: nuclear-eye
+target: linux-server
+
+allowed_models:
+  - name: arcface-r100
+    version: "1.0.0"
+    artifact: linux/arcface_r100.onnx
+    bundle_path: models/arcface_r100.onnx
+    note: "Server-side face embedding. AES-256-encrypted at rest (os/70 §2.3)."
+
+  - name: fer-efficientvit-m5
+    version: "1.0.0"
+    artifact: linux/fer.onnx
+    bundle_path: models/fer.onnx
+    note: "Server-side face emotion recognition."
+
+  - name: ser-lfcnn
+    version: "1.0.0"
+    artifact: linux/ser_lfcnn.onnx
+    bundle_path: models/ser_lfcnn.onnx
+    note: "Server-side speech emotion recognition."
+
+  - name: gesture-pose-classifier
+    version: "1.0.0"
+    artifact: linux/gesture_pose.onnx
+    bundle_path: models/gesture_pose.onnx
+    note: "Server-side gesture/pose classifier."
+
+forbidden_artifact_globs:
+  - "**/*.mlmodelc"
+  - "**/*.mlpackage"
+  - "**/companion*"
+  - "**/arianne*"
+  - "**/emile*"
+  - "**/*.safetensors"
+  - "**/*.pt"
