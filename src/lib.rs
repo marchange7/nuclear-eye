@@ -1,3 +1,4 @@
+pub mod alert;
 pub mod audit;
 pub mod consul;
 pub mod face_db_auth;
