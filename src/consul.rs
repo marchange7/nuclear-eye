@@ -111,12 +111,21 @@ async fn query_local(
             })
         }
         Ok(Err(e)) => {
-            tracing::error!("nuclear-consul unreachable, failing closed — no cloud fallback: {e}");
+            // "Failing closed" is the intended behavior: alarm_grader falls
+            // back to local grading. ERROR level was too aggressive — it
+            // produced ~23/min noise on b450 (2026-05-08) for what is the
+            // documented graceful-degradation path. WARN preserves operator
+            // visibility without spamming.
+            tracing::warn!("nuclear-consul unreachable, falling back to local grade (no cloud fallback): {e}");
             None
         }
         Err(_) => {
-            tracing::error!(
-                "nuclear-consul unreachable, failing closed — no cloud fallback: timed out (>{timeout_ms} ms)"
+            // Timeout is also expected — the 80ms ceiling is by design
+            // (alarm_grader needs a fast verdict). Demote to debug since
+            // the fallback path is the normal hot-loop case under any cold
+            // model, and keeping it at WARN obscures real errors.
+            tracing::debug!(
+                "nuclear-consul did not respond within {timeout_ms} ms; using local grade"
             );
             None
         }
