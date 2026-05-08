@@ -151,8 +151,20 @@ pub async fn post_domain_event(
     };
 
     let api_token = std::env::var("FORTRESS_API_TOKEN").unwrap_or_default();
+    // Fortress K-1: KERNEL_REQUIRE_TENANT_HEADER=1 rejects requests missing
+    // X-Tenant-Id. Default to nil UUID (Pass 1a/1b soak) when env unset.
+    // This is the shared-library /v1/events poster used by alarm_grader and
+    // every other nuclear-eye binary; fixing it here closes the whole class.
+    let tenant_id = std::env::var("FORTRESS_TENANT_ID").unwrap_or_default();
+    let tenant_id = tenant_id.trim();
+    let tenant_id = if tenant_id.is_empty() {
+        "00000000-0000-0000-0000-000000000000"
+    } else {
+        tenant_id
+    };
     let mut req = client
         .post(&url)
+        .header("X-Tenant-Id", tenant_id)
         .json(&body)
         .timeout(Duration::from_millis(DOMAIN_EVENT_TIMEOUT_MS));
     let token = api_token.trim();
