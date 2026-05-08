@@ -677,10 +677,20 @@ async fn process_event(
             });
             let token = api_token.trim();
             let nuclear_token = service_token.trim();
+            // Fortress K-1: KERNEL_REQUIRE_TENANT_HEADER=1 rejects requests
+            // missing X-Tenant-Id. Default to nil UUID for Pass 1a/1b soak.
+            let tenant_id = std::env::var("FORTRESS_TENANT_ID").unwrap_or_default();
+            let tenant_id = tenant_id.trim();
+            let tenant_id = if tenant_id.is_empty() {
+                "00000000-0000-0000-0000-000000000000"
+            } else {
+                tenant_id
+            };
             for agent in &["arianne", "emile"] {
                 let url = format!("{fortress_url}/v1/agents/{agent}/memory");
                 let mut req = http
                     .post(&url)
+                    .header("X-Tenant-Id", tenant_id)
                     .json(&payload)
                     .timeout(std::time::Duration::from_millis(500));
                 if !token.is_empty() {
@@ -879,8 +889,17 @@ async fn process_event(
             });
             let token = api_token.trim();
             let nuclear_token = service_token.trim();
+            // Fortress K-1 tenant injection (see /v1/agents/*/memory site above).
+            let tenant_id = std::env::var("FORTRESS_TENANT_ID").unwrap_or_default();
+            let tenant_id = tenant_id.trim();
+            let tenant_id = if tenant_id.is_empty() {
+                "00000000-0000-0000-0000-000000000000"
+            } else {
+                tenant_id
+            };
             let mut req = http
                 .post(format!("{fortress_url}/v1/stream/event"))
+                .header("X-Tenant-Id", tenant_id)
                 .json(&payload)
                 .timeout(std::time::Duration::from_millis(500));
             if !token.is_empty() {
