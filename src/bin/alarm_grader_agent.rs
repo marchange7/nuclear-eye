@@ -1384,8 +1384,20 @@ async fn publish_to_mesh(alarm: &AlarmEvent, triad: &AffectTriad, decision: &str
     let token = api_token.trim();
     let service_token = std::env::var("NUCLEAR_SERVICE_TOKEN").unwrap_or_default();
     let nuclear_token = service_token.trim();
+    // Fortress K-1: KERNEL_REQUIRE_TENANT_HEADER=1 rejects requests missing
+    // X-Tenant-Id. Default to nil UUID so Pass 1a/1b soak passes; operator
+    // can set FORTRESS_TENANT_ID to a real tenant when Pass 1c lands.
+    let tenant_id = std::env::var("FORTRESS_TENANT_ID")
+        .unwrap_or_default();
+    let tenant_id = tenant_id.trim();
+    let tenant_id = if tenant_id.is_empty() {
+        "00000000-0000-0000-0000-000000000000"
+    } else {
+        tenant_id
+    };
     let mut req = client
         .post(format!("{fortress_url}/v1/mesh/security"))
+        .header("X-Tenant-Id", tenant_id)
         .json(&payload)
         .timeout(std::time::Duration::from_millis(500));
     if !token.is_empty() {
