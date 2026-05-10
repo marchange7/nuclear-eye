@@ -804,9 +804,24 @@ async fn process_event(
             !watch_alarm_degraded,
             chain_enabled_local,
         );
-        if let Ok(json) = serde_json::to_string(&WatchEvent::AlertCanonical(canonical.clone())) {
-            let _ = state.watch_tx.send(json);
+
+        // L4: when SENTINELLE_GATEWAY_INGEST_URL is set, the gateway will
+        // re-broadcast the chain-SIGNED canonical envelope to /ws/alerts
+        // after Phase 3 publish. Skipping the local pre-sign emit here
+        // halves WS traffic per alert and avoids the dedup-by-alert_id
+        // race on the web side. When the env is unset (no gateway hop),
+        // we keep emitting locally so /ws/alerts subscribers still see
+        // the unsigned canonical (the only path they have).
+        let gateway_will_rebroadcast = std::env::var("SENTINELLE_GATEWAY_INGEST_URL")
+            .ok()
+            .map(|s| !s.trim().is_empty())
+            .unwrap_or(false);
+        if !gateway_will_rebroadcast {
+            if let Ok(json) = serde_json::to_string(&WatchEvent::AlertCanonical(canonical.clone())) {
+                let _ = state.watch_tx.send(json);
+            }
         }
+
         // Phase 3: fire-and-forget gateway ingest for chain signing.
         publish_canonical_to_gateway(state.http.clone(), canonical);
     }
@@ -1775,15 +1790,25 @@ fn publish_canonical_to_gateway(
         None => return,
     };
     let key = std::env::var("SENTINELLE_GATEWAY_KEY").unwrap_or_default();
+    // Y5 (T-P1-18): inter-service token. Without these headers the gateway
+    // logs "Y5: inter-service call missing or invalid service token" once
+    // per request; with FORTRESS_REQUIRE_SERVICE_TOKEN=true it hard-401s.
+    // The grader reuses the same NUCLEAR_SERVICE_TOKEN it already passes
+    // to fortress / kernel.
+    let service_token = std::env::var("NUCLEAR_SERVICE_TOKEN").unwrap_or_default();
     let alert_id = alert.alert_id.clone();
     tokio::spawn(async move {
-        let res = http
+        let mut req = http
             .post(&url)
             .header("X-Sentinelle-Key", key.trim())
+            .header("X-Nuclear-Service", "alarm_grader_agent")
             .timeout(Duration::from_millis(800))
-            .json(&alert)
-            .send()
-            .await;
+            .json(&alert);
+        let token = service_token.trim();
+        if !token.is_empty() {
+            req = req.header("X-Nuclear-Token", token);
+        }
+        let res = req.send().await;
         match res {
             Ok(r) if r.status().is_success() => {
                 info!(alert_id, status = %r.status(), "canonical alert chain-signed via gateway");
