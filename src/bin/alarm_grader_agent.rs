@@ -17,6 +17,13 @@ use tokio_stream::wrappers::BroadcastStream;
 use tokio_stream::StreamExt as _;
 use nuclear_eye::{decide, riviere, AffectTriad, AlarmEvent, AlarmGrader, AlarmLevel, AlarmSummary, ConsulClient, SecurityConfig, VisionEvent};
 use nuclear_eye::memory::SecurityMemory;
+use nuclear_eye::alert::{
+    AlertChainEnvelope, AlertConfidence, AlertDegraded, AlertEvent as CanonicalEvent,
+    AlertEventSource, AlertEventType, AlertEvidence, AlertReason, AlertRecommendedAction,
+    AlertSeverity, DegradedFlag, EvidenceKind, RecommendedActionPrimary, SentinelleAlert,
+    SCHEMA_VERSION,
+};
+use std::collections::BTreeMap;
 use nuclear_sdk::NuclearClient;
 use serde::{Deserialize, Serialize};
 use tokio::sync::{broadcast, Mutex};
@@ -84,6 +91,18 @@ enum WatchEvent {
         scene: String,
         objects: Vec<String>,
     },
+    /// SEN-15 (D-full Phase 2, 2026-05-10) — canonical `SentinelleAlert`
+    /// envelope per os/70 §4. Emitted alongside legacy `WatchEvent::Alarm`
+    /// when `EMIT_CANONICAL_ALERTS=1`. The web inbox / sentinelle-web
+    /// `live-alerts.ts:205` `isSentinelleAlert(record)` check picks this up
+    /// and renders the full evidence/confidence/recommended-action panel
+    /// (the AlertDetail modal we just landed in sentinelle-web).
+    /// nuclear-watch / sentinelle-ios continue to parse the legacy `Alarm`
+    /// variant until they migrate.
+    /// `serde(tag="type")` flattens the `SentinelleAlert` fields next to
+    /// `"type": "sentinelle.alert.canonical"`.
+    #[serde(rename = "sentinelle.alert.canonical")]
+    AlertCanonical(SentinelleAlert),
 }
 
 #[derive(Debug, Deserialize)]
@@ -732,17 +751,64 @@ async fn process_event(
 
     // ── 2. WebSocket broadcast to nuclear-watch (O6 + existing types) ─────────
 
-    // 2a. Alarm event (existing)
-    if let Ok(json) = serde_json::to_string(&WatchEvent::Alarm {
-        ts: alarm.timestamp_ms,
-        camera_id: event.camera_id.clone(),
-        level: alarm.level.to_string(),
-        score: alarm.danger_score,
-        reason: alarm.note.clone(),
-        caption: alarm.vlm_caption.clone(),
-        degraded: watch_alarm_degraded,
-    }) {
-        let _ = state.watch_tx.send(json);
+    // 2a. Alarm broadcast — SEN-15 (D-full, 2026-05-10) introduces a flag
+    // to switch between the legacy minimal `WatchEvent::Alarm` and the
+    // canonical `SentinelleAlert` envelope per os/70 §4.
+    //
+    //   EMIT_CANONICAL_ALERTS unset / 0 → legacy only (status quo;
+    //                                     nuclear-watch + sentinelle-ios
+    //                                     parsers stay valid).
+    //   EMIT_CANONICAL_ALERTS=1         → canonical only. The web inbox
+    //                                     `live-alerts.ts:205`
+    //                                     `isSentinelleAlert(record)` test
+    //                                     picks it up and renders the full
+    //                                     AlertDetail modal. nuclear-watch /
+    //                                     iOS need to migrate before flipping
+    //                                     this on in their environments.
+    //   EMIT_CANONICAL_ALERTS=2         → both (DEV ONLY). Web shows duplicate
+    //                                     rows because the two messages have
+    //                                     different ids — useful for diffing.
+    //
+    // Phase 3: when canonical is emitted and SENTINELLE_GATEWAY_INGEST_URL
+    // is set, the alert is also fire-and-forget POSTed to the gateway for
+    // chain signing per os/74 (the gateway re-broadcasts with `chain.signed=true`).
+    let canonical_mode = std::env::var("EMIT_CANONICAL_ALERTS")
+        .ok()
+        .map(|v| v.trim().to_ascii_lowercase())
+        .unwrap_or_default();
+    let emit_canonical = matches!(canonical_mode.as_str(), "1" | "true" | "2");
+    let emit_legacy    = canonical_mode != "1" && canonical_mode != "true";
+
+    if emit_legacy {
+        if let Ok(json) = serde_json::to_string(&WatchEvent::Alarm {
+            ts: alarm.timestamp_ms,
+            camera_id: event.camera_id.clone(),
+            level: alarm.level.to_string(),
+            score: alarm.danger_score,
+            reason: alarm.note.clone(),
+            caption: alarm.vlm_caption.clone(),
+            degraded: watch_alarm_degraded,
+        }) {
+            let _ = state.watch_tx.send(json);
+        }
+    }
+
+    if emit_canonical && alarm.level != AlarmLevel::None {
+        let chain_enabled_local = std::env::var("CHAIN_ENABLED")
+            .map(|v| v.trim().eq_ignore_ascii_case("true"))
+            .unwrap_or(false);
+        let canonical = build_canonical_alert(
+            &event,
+            &alarm,
+            consul_note.as_deref(),
+            !watch_alarm_degraded,
+            chain_enabled_local,
+        );
+        if let Ok(json) = serde_json::to_string(&WatchEvent::AlertCanonical(canonical.clone())) {
+            let _ = state.watch_tx.send(json);
+        }
+        // Phase 3: fire-and-forget gateway ingest for chain signing.
+        publish_canonical_to_gateway(state.http.clone(), canonical);
     }
 
     // 2b. Pedestrian event (O6 / scout) — emitted when at least one person detected.
@@ -1430,6 +1496,306 @@ async fn publish_to_mesh(alarm: &AlarmEvent, triad: &AffectTriad, decision: &str
         Ok(resp) => info!(status = %resp.status(), "published alarm to Fortress mesh"),
         Err(err) => warn!(%err, "Fortress publish failed (non-blocking)"),
     }
+}
+
+// ── SEN-15 D-full Phase 2: canonical SentinelleAlert builder ─────────────────
+//
+// Builds a `SentinelleAlert` per os/70 §4 from grader-side state. Pre-sign:
+// `chain.signed = false`, hashes null. Phase 3 (`publish_canonical_to_gateway`)
+// POSTs this to the gateway `/api/alerts/ingest` for chain signing if the
+// SENTINELLE_GATEWAY_INGEST_URL env is set. Otherwise the unsigned envelope
+// rides the WebSocket directly — web inbox renders fine but `chain.signed`
+// stays false (visible as ⚠ unsigned in the AlertDetail modal).
+
+/// Map our internal `AlarmLevel` plus danger score to canonical
+/// `AlertSeverity` per os/70. The only non-trivial cut is High vs Critical
+/// — score >= 0.85 within High level escalates to critical, which gates
+/// `requires_biometric_auth` and `dispatch_emergency` in the recommended
+/// action.
+fn map_severity(level: &AlarmLevel, score: f64) -> AlertSeverity {
+    match level {
+        AlarmLevel::None => AlertSeverity::Info,
+        AlarmLevel::Low => AlertSeverity::Low,
+        AlarmLevel::Medium => AlertSeverity::Medium,
+        AlarmLevel::High if score >= 0.85 => AlertSeverity::Critical,
+        AlarmLevel::High => AlertSeverity::High,
+    }
+}
+
+/// Map a vlm-derived behavior token + caption keywords onto an
+/// `AlertEventType` from the os/70 controlled vocabulary.
+///
+/// The current 9-value enum doesn't cover behavioral detections (weapons,
+/// fighting, loitering); these collapse to `MotionInRestrictedZone` with
+/// the original behavior preserved as the alert `subtype` for downstream
+/// fidelity. When the schema grows a `behavioral_threat` event type, this
+/// mapping is the place to update.
+fn map_event_type(behavior: &str, caption: Option<&str>) -> AlertEventType {
+    let lc_caption = caption.unwrap_or("").to_lowercase();
+    if lc_caption.contains("intruder")
+        || lc_caption.contains("breaking")
+        || lc_caption.contains("forced")
+    {
+        return AlertEventType::PerimeterBreach;
+    }
+    if lc_caption.contains("smoke") || lc_caption.contains("fire") {
+        return AlertEventType::FireOrSmoke;
+    }
+    if lc_caption.contains("glass") && lc_caption.contains("break") {
+        return AlertEventType::GlassBreak;
+    }
+    match behavior {
+        "no_activity" | "vehicle_present" | "passby" => AlertEventType::MotionInRestrictedZone,
+        // weapon_detected / fighting / running / loitering / approaching → motion+subtype
+        _ => AlertEventType::MotionInRestrictedZone,
+    }
+}
+
+/// Map severity + behavior to recommended action (os/70 §4.6).
+fn map_recommended_action(
+    severity: AlertSeverity,
+    person_known: bool,
+) -> AlertRecommendedAction {
+    let primary = match severity {
+        AlertSeverity::Critical => RecommendedActionPrimary::DispatchEmergency,
+        AlertSeverity::High if person_known => RecommendedActionPrimary::NotifyOperator,
+        AlertSeverity::High => RecommendedActionPrimary::ArmEscalation,
+        AlertSeverity::Medium => RecommendedActionPrimary::NotifyUser,
+        AlertSeverity::Low => RecommendedActionPrimary::SilentLog,
+        AlertSeverity::Info => RecommendedActionPrimary::Defer,
+    };
+    AlertRecommendedAction {
+        primary,
+        secondary: vec![],
+        requires_biometric_auth: Some(matches!(primary, RecommendedActionPrimary::DispatchEmergency)),
+        requires_operator_ack: Some(matches!(
+            severity,
+            AlertSeverity::High | AlertSeverity::Critical
+        )),
+        // `reversible_until` would mark a soft-cancel window; left None
+        // until the policy layer (os/70 §5 stage 5) decides per-event.
+        reversible_until: None,
+    }
+}
+
+/// Build a canonical `SentinelleAlert` from the grader's local context
+/// post-grade. Tenant id is read from `NUCLEAR_TENANT_ID` (falls back to
+/// the well-known dev UUID) — gateway re-stamps anyway on ingest.
+#[allow(clippy::too_many_arguments)]
+fn build_canonical_alert(
+    event: &VisionEvent,
+    alarm: &AlarmEvent,
+    consul_note: Option<&str>,
+    penny_applied: bool,
+    chain_enabled: bool,
+) -> SentinelleAlert {
+    let severity = map_severity(&alarm.level, alarm.danger_score);
+    let event_type = map_event_type(&event.behavior, event.vlm_caption.as_deref());
+
+    // Confidence components: vision (always) + face/voice/gesture when
+    // perceive_service populated them (Phase 1).
+    let mut components: BTreeMap<String, f32> = BTreeMap::new();
+    components.insert("vision".to_string(), event.confidence as f32);
+    if let Some(v) = event.face_negative   { components.insert("face".to_string(),    v); }
+    if let Some(v) = event.voice_agitated  { components.insert("voice".to_string(),   v); }
+    if let Some(v) = event.gesture_threat  { components.insert("gesture".to_string(), v); }
+
+    let mut method_parts: Vec<&str> = vec!["caption_to_vision_event"];
+    if event.face_negative.is_some()
+        || event.voice_agitated.is_some()
+        || event.gesture_threat.is_some()
+    {
+        method_parts.push("perceive_service");
+    }
+    if penny_applied { method_parts.push("penny_l1"); }
+    if consul_note.is_some() { method_parts.push("consul"); }
+    let method = method_parts.join("+");
+
+    // Evidence list: vision_inference always; identity_match when face_db
+    // returned a person_name on the upstream event (face_db ArcFace search
+    // result rides on `VisionEvent.person_name` from vision_agent / iphone_sensor_agent);
+    // crew_verdict when Consul synthesized.
+    let mut evidence: Vec<AlertEvidence> = vec![AlertEvidence {
+        kind: EvidenceKind::VisionInference,
+        model: Some("nuclear-eye/vision_agent+fastvlm".to_string()),
+        label: Some(event.behavior.clone()),
+        confidence: alarm.danger_score as f32,
+        frame_refs: vec![],
+        redactions: vec![],
+        extra: BTreeMap::new(),
+    }];
+
+    if let Some(name) = event.person_name.as_ref() {
+        // N4 (D-full follow-up): face_db ArcFace match surfaced via the
+        // upstream VisionEvent.person_name. We don't have the raw match
+        // score plumbed through yet — use `event.confidence` (the vision
+        // pipeline's own self-report) as a proxy. When face_db match
+        // scores are propagated end-to-end, swap to that field and add
+        // `extra: { match_id, threshold }` per os/70 evidence schema.
+        let mut extra = BTreeMap::new();
+        extra.insert(
+            "match_via".into(),
+            serde_json::Value::String("vision_event.person_name".to_string()),
+        );
+        evidence.push(AlertEvidence {
+            kind: EvidenceKind::IdentityMatch,
+            model: Some("face_db/arcface".to_string()),
+            label: Some(name.clone()),
+            confidence: event.confidence as f32,
+            frame_refs: vec![],
+            redactions: vec![],
+            extra,
+        });
+    }
+
+    if let Some(note) = consul_note {
+        let mut extra = BTreeMap::new();
+        extra.insert("synthesis".into(), serde_json::Value::String(note.to_string()));
+        evidence.push(AlertEvidence {
+            kind: EvidenceKind::CrewVerdict,
+            model: Some("nuclear-consul".to_string()),
+            label: Some("consul deliberation".to_string()),
+            // We don't surface a numeric confidence from the consul note
+            // string; downstream renderers degrade to "—" when zero.
+            confidence: 0.0,
+            frame_refs: vec![],
+            redactions: vec![],
+            extra,
+        });
+    }
+
+    // Degraded flags. Penny didn't apply → kernel_unreachable. Score
+    // window low → low_confidence. When chain is disabled the chain
+    // envelope rides as signed=false and we surface chain_unavailable
+    // so the UI's degraded badge stays honest.
+    let mut flags: Vec<DegradedFlag> = vec![];
+    if !penny_applied && alarm.level == AlarmLevel::High {
+        flags.push(DegradedFlag::KernelUnreachable);
+    }
+    if alarm.danger_score > 0.0 && alarm.danger_score < 0.35 {
+        flags.push(DegradedFlag::LowConfidence);
+    }
+    if !chain_enabled {
+        flags.push(DegradedFlag::ChainUnavailable);
+    }
+    // Perception degraded: vision_agent populated event.confidence, but
+    // perceive_service didn't return any modality. Caller can't always
+    // tell unset-because-disabled vs unset-because-failed; we only flag
+    // it when PERCEIVE_URL is set on this host but all modalities are None.
+    let perceive_configured = std::env::var("PERCEIVE_URL")
+        .ok()
+        .map(|s| !s.trim().is_empty())
+        .unwrap_or(false);
+    if perceive_configured
+        && event.face_negative.is_none()
+        && event.voice_agitated.is_none()
+        && event.gesture_threat.is_none()
+    {
+        flags.push(DegradedFlag::PerceptionDegraded);
+    }
+
+    // Reason: clip summary to schema cap (280); full note rides in
+    // detail_markdown so AlertDetail can render the long form.
+    let summary_full = if alarm.note.is_empty() {
+        format!("{} on {}", event.behavior, event.camera_id)
+    } else {
+        alarm.note.clone()
+    };
+    let summary: String = summary_full.chars().take(280).collect();
+
+    let person_known = event.person_name.is_some();
+
+    let tenant_id = std::env::var("NUCLEAR_TENANT_ID")
+        .ok()
+        .filter(|s| !s.trim().is_empty())
+        .unwrap_or_else(|| "00000000-0000-0000-0000-000000000000".to_string());
+
+    let observed_at = chrono::DateTime::<Utc>::from_timestamp_millis(event.timestamp_ms as i64)
+        .unwrap_or_else(Utc::now);
+
+    SentinelleAlert {
+        schema_version: SCHEMA_VERSION,
+        alert_id: alarm.alarm_id.clone(),
+        tenant_id,
+        product: "sentinelle".to_string(),
+        issued_at: Utc::now(),
+        issued_by: "nuclear-eye/alarm_grader_agent".to_string(),
+        event: CanonicalEvent {
+            kind: event_type,
+            subtype: Some(event.behavior.clone()),
+            severity,
+            source: AlertEventSource {
+                camera_id: Some(event.camera_id.clone()),
+                sensor_id: None,
+                zone_id: None,
+            },
+            observed_at,
+            duration_ms: None,
+        },
+        confidence: AlertConfidence {
+            overall: alarm.danger_score as f32,
+            components,
+            method,
+        },
+        evidence,
+        reason: AlertReason {
+            summary,
+            detail_markdown: event.vlm_caption.clone().or_else(|| Some(alarm.note.clone())),
+        },
+        degraded: AlertDegraded {
+            any: !flags.is_empty(),
+            flags,
+        },
+        recommended_action: map_recommended_action(severity, person_known),
+        chain: AlertChainEnvelope {
+            // Pre-sign: gateway `/api/alerts/ingest` replaces this on
+            // signing. WS-direct path keeps signed=false.
+            signed: false,
+            chain_hash: None,
+            prev_alert_hash: None,
+            signer: None,
+        },
+    }
+}
+
+/// Phase 3: fire-and-forget POST to the gateway's `/api/alerts/ingest`
+/// for chain signing (os/74) and re-broadcast with the signed envelope.
+/// Gated on `SENTINELLE_GATEWAY_INGEST_URL` + `SENTINELLE_GATEWAY_KEY`.
+/// Failure is logged at WARN; the WS broadcast already carries the
+/// (unsigned) canonical envelope so consumers never go blind.
+fn publish_canonical_to_gateway(
+    http: reqwest::Client,
+    alert: SentinelleAlert,
+) {
+    let url = match std::env::var("SENTINELLE_GATEWAY_INGEST_URL")
+        .ok()
+        .and_then(|s| Some(s.trim().to_string()).filter(|v| !v.is_empty()))
+    {
+        Some(u) => u,
+        None => return,
+    };
+    let key = std::env::var("SENTINELLE_GATEWAY_KEY").unwrap_or_default();
+    let alert_id = alert.alert_id.clone();
+    tokio::spawn(async move {
+        let res = http
+            .post(&url)
+            .header("X-Sentinelle-Key", key.trim())
+            .timeout(Duration::from_millis(800))
+            .json(&alert)
+            .send()
+            .await;
+        match res {
+            Ok(r) if r.status().is_success() => {
+                info!(alert_id, status = %r.status(), "canonical alert chain-signed via gateway");
+            }
+            Ok(r) => {
+                warn!(alert_id, status = %r.status(), "gateway ingest non-2xx");
+            }
+            Err(e) => {
+                warn!(alert_id, error = %e, "gateway ingest failed (non-blocking)");
+            }
+        }
+    });
 }
 
 #[cfg(test)]

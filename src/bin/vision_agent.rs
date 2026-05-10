@@ -7,6 +7,7 @@ use axum::{
 };
 use nuclear_eye::{caption_to_vision_event, now_ms, SecurityConfig, VisionEvent};
 use nuclear_eye::memory::SecurityMemory;
+use nuclear_eye::perceive_client::{perceive_url_from_env, perceive_frame_only};
 use reqwest::Client;
 use std::convert::Infallible;
 use std::sync::{Arc, Mutex};
@@ -369,7 +370,41 @@ async fn capture_and_analyze(
 
     let caption = describe_image(fastvlm_url, &image_bytes).await?;
     info!("vlm.caption: {caption}");
-    Some(caption_to_vision_event(camera_id, &caption, now_ms()))
+    let mut event = caption_to_vision_event(camera_id, &caption, now_ms());
+
+    // SEN-15 (D-full Phase 1, 2026-05-10): close os/05 §"Multimodal Perception
+    // Stack" — call perceive_service with the same JPEG and populate the
+    // three fields that compute_perceptual_risk in alarm_grader_agent reads.
+    // Until this lands, vision_agent hardcoded all three to None and the
+    // fusion was wired-but-starved. PERCEIVE_URL unset = bypass (status quo).
+    if let Some(perceive_url) = perceive_url_from_env() {
+        match perceive_frame_only(client, &perceive_url, camera_id, &image_bytes).await {
+            Ok(out) => {
+                event.face_negative   = out.face_negative;
+                event.voice_agitated  = out.voice_agitated;
+                event.gesture_threat  = out.gesture_threat;
+                if out.any_modality() {
+                    info!(
+                        camera_id,
+                        face = ?event.face_negative,
+                        voice = ?event.voice_agitated,
+                        gesture = ?event.gesture_threat,
+                        method = %out.method,
+                        "perceive: populated multimodal fields"
+                    );
+                }
+            }
+            Err(e) => {
+                // Tolerate failure: the camera→grader pipeline keeps moving
+                // with face/voice/gesture = None. Grader records this as
+                // perception_degraded (Phase 2) when emitting the canonical
+                // SentinelleAlert, but never blocks on it.
+                warn!(camera_id, error = %e, "perceive: call failed; degrading to None");
+            }
+        }
+    }
+
+    Some(event)
 }
 
 async fn describe_image(fastvlm_url: &str, image_bytes: &[u8]) -> Option<String> {
