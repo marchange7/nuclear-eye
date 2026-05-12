@@ -1,7 +1,3 @@
-## Manual notes (preserved across sync)
-
-- AUD-112-P1-5 [agent] iphone_sensor_agent is lab-only - face/voice/gesture all hardcoded to None at src/bin/iphone_sensor_agent.rs:410-412. Either wire perceive_service or keep header-comment scope declaration. See os/05 lab-only callout and os/112 §3.3.
-
 # nuclear-eye — TODO
 
 > AUTO-GENERATED 2026-05-12 from `~/git/os/PLAN.md` by `~/ai-structure/scripts/sync-todos.py`.
@@ -13,18 +9,23 @@
 
 Redo audit after the latest cross-repo changes found the implementation ahead of several numbered docs. Until the rows below close, treat `os/agent-comms/NOW.md`, `os/112-cross-product-reality-audit-2026-05-12.md`, and b450 runtime probes as newer than older chain/port/release-gate wording.
 
-- [ ] **AUD-112-P0-1** Update stale chain/port/release-gate docs: `os/03`, `os/04`, `os/05`, `os/39`, `os/41`, `os/53`, `os/57`, `os/58`, `os/PASS_1C_RUNBOOK`, `os/110`.
-- [ ] **AUD-112-P0-2** Refresh `os/agent-comms/BLOCKERS.md` for post-D-full Sentinelle residuals and remove resolved-first ambiguity from the top of the file.
-- [ ] **AUD-112-P1-1** Add a b450 listener truth diagram to `os/35`: gateways, chain-signer, FastVLM, perceive, Fortress, Penny.
-- [ ] **AUD-112-P1-2** Arianne voice-first closure: full-duplex/call UX, real STT state, clear fallback states, speech-emotion availability.
-- [ ] **AUD-112-P1-3** Arianne L1 artifact closure: verify `ArcFace.mlmodelc` App Store bundle phase; bundle or explicitly fallback-gate `LFCNN.mlmodelc`, `EfficientViT_FER.mlmodelc`, and Whisper artifacts.
-- [x] **AUD-112-P1-4** Emile sensing boundary: Emile owns enterprise L1 sidecars behind `apps/api-gateway`; renderer/avatar direct kernel bypasses are documented and guarded by `emile/docs/human-sensing-boundary.md` + `emile/scripts/check-emile-sensing-boundary.sh`.
-- [ ] **AUD-112-P1-5** Sentinelle iPhone sensor path: wire `iphone_sensor_agent` to real L1 perception fields or declare it lab-only.
-- [ ] **AUD-112-P1-6** Sentinelle model maturity: deploy real FER/SER for `perceive_service` or expose heuristic/fallback mode in health.
-- [ ] **AUD-112-P1-7** Enforce product-gateway-only ingress in Emile/Arianne/Sentinelle docs and runtime config.
+Status: 13 of 15 rows closed 2026-05-12. Remaining: P0-OP-1 (op key rotation), P1-6 (op SER deploy). See `os/112 §6` for evidence pointers.
+
+- [x] **AUD-112-P0-1** Update stale chain/port/release-gate docs: `os/03`, `os/04`, `os/05`, `os/39`, `os/41`, `os/53`, `os/57`, `os/58`, `os/PASS_1C_RUNBOOK`, `os/110` — closed 2026-05-12: 24 partial-supersession banners across 10 docs cross-linking to `os/112 §X.Y`.
+- [x] **AUD-112-P0-2** Refresh `os/agent-comms/BLOCKERS.md` for post-D-full Sentinelle residuals and remove resolved-first ambiguity — closed 2026-05-12: active 008/009 at top; resolved 007-001 moved under `## Resolved (preserved for forensic value)`; BLOCKER-009 tightened with 4 Sentinelle residuals.
+- [x] **AUD-112-P0-3** Route `~/git/README_AGENT_START_HERE.md` minimal-read to NOW + os/112 + HANDOFF + DECISIONS first — closed 2026-05-12: routing applied in §"Minimal read".
+- [ ] **AUD-112-P0-OP-1** Operator: rotate any Anthropic, Gemini, Fortress, Sentinelle, Arianne keys that pre-date the scrub. PREP DONE 2026-05-12: `os/runbooks/key-inventory.md` (15 keys), `os/runbooks/rotate-keys.md` (step-by-step per class), `scripts/key-rotation-helper.sh` (b450 audit). Operator still does the rotation.
+- [x] **AUD-112-P1-1** Add a b450 listener truth diagram to `os/35`: gateways, chain-signer, FastVLM, perceive, Fortress, Penny — closed 2026-05-12: `os/35 §B.2` mermaid diagram.
+- [x] **AUD-112-P1-2** Arianne voice-first closure: full-duplex/call UX, real STT state, clear fallback states, speech-emotion availability — closed 2026-05-12: spec `os/runbooks/arianne-voice-first-spec-2026-05-12.md`; arianne-ios commits `dc390d2` (CallActivityWidget Dynamic Island + lock-screen body, transcribing indicator) + `8e37ec9` (listening pulse, honest mic plist).
+- [x] **AUD-112-P1-3** Arianne L1 artifact closure: verify `ArcFace.mlmodelc` App Store bundle phase; bundle or explicitly fallback-gate `LFCNN.mlmodelc`, `EfficientViT_FER.mlmodelc`, and Whisper artifacts — closed 2026-05-12: arianne-ios commit `214c775` adds `resources: - path: Resources` to project.yml; ArcFace now ships. LFCNN/FER/Whisper remain gated by os/69 + os/73 release gates. Runbook: `os/runbooks/ml-artifact-bundle-audit-2026-05-12.md`.
+- [x] **AUD-112-P1-4** Emile sensing boundary: Emile owns enterprise L1 sidecars behind `apps/api-gateway`; renderer/avatar direct kernel bypasses are documented and guarded by `emile/docs/human-sensing-boundary.md` + `emile/scripts/check-emile-sensing-boundary.sh`. (Audit version: `os/113-emile-sensing-boundary-2026-05-12.md` recommends Option C hybrid.)
+- [x] **AUD-112-P1-5** Sentinelle iPhone sensor path: wire `iphone_sensor_agent` to real L1 perception fields or declare it lab-only — closed 2026-05-12: 20-line LAB / QA ONLY header on `nuclear-eye/src/bin/iphone_sensor_agent.rs`; documented in `os/05` + `os/112 §3.3`.
+- [ ] **AUD-112-P1-6** Sentinelle model maturity: deploy real FER/SER for `perceive_service` or expose heuristic/fallback mode in health. SCAFFOLD DONE 2026-05-12: `nuclear-eye` commit `0f490a7` exposes `models.fer {mode, path, loaded_at}` + `models.ser {mode, url, reachable}` on `/health`. Runbook: `os/runbooks/fer-ser-deployment-2026-05-12.md`. FER ONNX already on b450; SER recommended to stay delegated.
+- [x] **AUD-112-P1-7** Enforce product-gateway-only ingress in Emile/Arianne/Sentinelle docs and runtime config — closed 2026-05-12: `scripts/check-no-direct-kernel.sh` + `scripts/hooks/pre-commit` landed (operator-parallel).
 - [x] **AUD-112-P1-8** Finish `nuclear-sdk` 0.5 consumer pin/path-dependency policy across nuclear-eye, nuclear-bootstrap, and aurelia — closed 2026-05-12 with guarded local path deps (`version = "0.5"` + path) and `nuclear-sdk/scripts/check-consumer-sdk-policy.sh`; registry publish remains an operator/release step.
-- [ ] **AUD-112-P2-1** Add conformance checks for `os/75`: no raw payload retention, no third lane, telemetry reject tests.
-- [ ] **AUD-112-P2-2** Reconcile release gates in `os/69`, `os/73`, `os/75`, and `os/101` against real code/tests/TODO rows.
+- [x] **AUD-112-P2-1** Add conformance checks for `os/75`: no raw payload retention, no third lane, telemetry reject tests — closed 2026-05-12: contract test stubs in `arianne/tests/contract/` (4), `nuclear-winter/tests/contract/`, `nuclear-sdk/.../tests/contract.rs`, `lucky7/core/tests/contract.rs`.
+- [x] **AUD-112-P2-2** Reconcile release gates in `os/69`, `os/73`, `os/75`, and `os/101` against real code/tests/TODO rows — closed 2026-05-12: inline annotations per row (`_(implemented YYYY-MM-DD: <path>)_` / `_(still open as of 2026-05-12: <reason>)_` / `_(needs operator decision: <q>)_`).
+- [x] **AUD-112-P2-3** Bridge or document the separation between `sentinelle-web`'s `PortalGatewayContext` and `AdminGatewayContext` — closed 2026-05-12 via Path A: `sentinelle-web/docs/auth-contexts.md` (203 lines) documents the deliberate two-root design.
 
 ## 1.1 Phase 0 unblock
 
