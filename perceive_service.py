@@ -560,7 +560,9 @@ async def health():
     return {
         "status": "ok",
         "service": "nuclear-eye-perceive",
-        "port": 8091,
+        # AUD-112-P1-6 follow-up (2026-05-12): was hardcoded 8091; the real
+        # listen port is PERCEIVE_PORT env (8094 on b450). Reflect truth.
+        "port": int(os.getenv("PERCEIVE_PORT", "8091")),
         "models": {
             "fer": {
                 "mode": fer_mode,
