@@ -14,11 +14,11 @@ Redo audit after the latest cross-repo changes found the implementation ahead of
 - [ ] **AUD-112-P1-1** Add a b450 listener truth diagram to `os/35`: gateways, chain-signer, FastVLM, perceive, Fortress, Penny.
 - [ ] **AUD-112-P1-2** Arianne voice-first closure: full-duplex/call UX, real STT state, clear fallback states, speech-emotion availability.
 - [ ] **AUD-112-P1-3** Arianne L1 artifact closure: verify `ArcFace.mlmodelc` App Store bundle phase; bundle or explicitly fallback-gate `LFCNN.mlmodelc`, `EfficientViT_FER.mlmodelc`, and Whisper artifacts.
-- [ ] **AUD-112-P1-4** Emile sensing boundary: decide whether Emile consumes shared L1 contracts or owns enterprise L1 sidecars; block renderer/avatar direct kernel bypasses.
+- [x] **AUD-112-P1-4** Emile sensing boundary: Emile owns enterprise L1 sidecars behind `apps/api-gateway`; renderer/avatar direct kernel bypasses are documented and guarded by `emile/docs/human-sensing-boundary.md` + `emile/scripts/check-emile-sensing-boundary.sh`.
 - [ ] **AUD-112-P1-5** Sentinelle iPhone sensor path: wire `iphone_sensor_agent` to real L1 perception fields or declare it lab-only.
 - [ ] **AUD-112-P1-6** Sentinelle model maturity: deploy real FER/SER for `perceive_service` or expose heuristic/fallback mode in health.
 - [ ] **AUD-112-P1-7** Enforce product-gateway-only ingress in Emile/Arianne/Sentinelle docs and runtime config.
-- [ ] **AUD-112-P1-8** Finish `nuclear-sdk` 0.5 consumer pin/path-dependency policy across nuclear-eye, nuclear-bootstrap, and aurelia.
+- [x] **AUD-112-P1-8** Finish `nuclear-sdk` 0.5 consumer pin/path-dependency policy across nuclear-eye, nuclear-bootstrap, and aurelia — closed 2026-05-12 with guarded local path deps (`version = "0.5"` + path) and `nuclear-sdk/scripts/check-consumer-sdk-policy.sh`; registry publish remains an operator/release step.
 - [ ] **AUD-112-P2-1** Add conformance checks for `os/75`: no raw payload retention, no third lane, telemetry reject tests.
 - [ ] **AUD-112-P2-2** Reconcile release gates in `os/69`, `os/73`, `os/75`, and `os/101` against real code/tests/TODO rows.
 
