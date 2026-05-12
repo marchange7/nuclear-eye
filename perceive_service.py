@@ -235,6 +235,7 @@ async def call_ser(session: aiohttp.ClientSession, audio_b64: str, sample_rate: 
 
 _fer_session: Optional[object] = None  # onnxruntime.InferenceSession
 _fer_classes: list = ["angry", "disgust", "fear", "happy", "neutral", "sad", "surprise"]
+_fer_loaded_at: Optional[str] = None   # ISO-8601 timestamp when ONNX session was created
 
 # Russell circumplex: valence/arousal per FER class
 _FER_AFFECT: dict = {
@@ -395,21 +396,25 @@ async def call_gesture(frame_b64: str) -> Optional[dict]:
 
 
 def _load_fer_model() -> bool:
-    """Load EfficientViT FER ONNX model. Returns True on success."""
-    global _fer_session, _fer_classes
+    """Load EfficientViT FER ONNX model. Returns True on success.
+    Gracefully returns False (heuristic mode) when FER_MODEL_PATH is unset or file absent."""
+    global _fer_session, _fer_classes, _fer_loaded_at
     if _fer_session is not None:
         return True
     model_path = os.getenv("FER_MODEL_PATH", "/etc/nuclear/models/fer_efficientvit.onnx")
     classes_path = os.getenv("FER_CLASSES_PATH", "/etc/nuclear/models/fer_efficientvit_classes.json")
-    if not os.path.exists(model_path):
+    if not model_path or not os.path.exists(model_path):
+        print(f"[perceive] FER model not found at '{model_path}' — using heuristic mode", flush=True)
         return False
     try:
         import onnxruntime as ort
+        from datetime import datetime, timezone
         opts = ort.SessionOptions()
         opts.inter_op_num_threads = 2
         opts.intra_op_num_threads = 2
         providers = ["CUDAExecutionProvider", "CPUExecutionProvider"]
         _fer_session = ort.InferenceSession(model_path, sess_options=opts, providers=providers)
+        _fer_loaded_at = datetime.now(timezone.utc).isoformat()
         if os.path.exists(classes_path):
             with open(classes_path) as f:
                 data = json.load(f)
@@ -417,7 +422,7 @@ def _load_fer_model() -> bool:
         print(f"[perceive] FER ONNX loaded: {model_path}  classes={_fer_classes}", flush=True)
         return True
     except Exception as e:
-        print(f"[perceive] FER ONNX load failed: {e}", flush=True)
+        print(f"[perceive] FER ONNX load failed: {e} — using heuristic mode", flush=True)
         return False
 
 
@@ -525,9 +530,50 @@ async def perceive(req: PerceiveRequest):
     )
 
 
+async def _ser_reachable() -> bool:
+    """Probe SER_URL /health with a short timeout. Returns True if HTTP 200."""
+    try:
+        async with httpx.AsyncClient() as client:
+            r = await client.get(f"{SER_URL}/health", timeout=1.5)
+            return r.status_code == 200
+    except Exception:
+        return False
+
+
 @app.get("/health")
 async def health():
-    return {"status": "ok", "service": "nuclear-eye-perceive", "port": 8091}
+    fer_model_path = os.getenv("FER_MODEL_PATH", "/etc/nuclear/models/fer_efficientvit.onnx") or None
+    fer_mode = "live" if _fer_session is not None else "heuristic"
+    # Surface the configured path only when it points to an existing file.
+    fer_path = fer_model_path if (fer_model_path and os.path.exists(fer_model_path)) else None
+
+    ser_reachable = await _ser_reachable()
+    # SER mode: "live" when arianne-ser at SER_URL is up, otherwise "delegate" (configured
+    # but unreachable) or "heuristic" (no URL configured).
+    if not SER_URL:
+        ser_mode = "heuristic"
+    elif ser_reachable:
+        ser_mode = "live"
+    else:
+        ser_mode = "delegate"
+
+    return {
+        "status": "ok",
+        "service": "nuclear-eye-perceive",
+        "port": 8091,
+        "models": {
+            "fer": {
+                "mode": fer_mode,
+                "path": fer_path,
+                "loaded_at": _fer_loaded_at,
+            },
+            "ser": {
+                "mode": ser_mode,
+                "url": SER_URL or None,
+                "reachable": ser_reachable,
+            },
+        },
+    }
 
 
 @app.get("/v1/perceive/labels")
