@@ -1,3 +1,7 @@
+## Manual notes (preserved across sync)
+
+- AUD-112-P1-5 [agent] iphone_sensor_agent is lab-only - face/voice/gesture all hardcoded to None at src/bin/iphone_sensor_agent.rs:410-412. Either wire perceive_service or keep header-comment scope declaration. See os/05 lab-only callout and os/112 §3.3.
+
 # nuclear-eye — TODO
 
 > AUTO-GENERATED 2026-05-12 from `~/git/os/PLAN.md` by `~/ai-structure/scripts/sync-todos.py`.

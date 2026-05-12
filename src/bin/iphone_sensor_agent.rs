@@ -1,3 +1,23 @@
+// iphone_sensor_agent.rs - LAB / QA ONLY (AUD-112-P1-5, 2026-05-12)
+//
+// This binary currently hardcodes `face_negative: None`, `voice_agitated: None`,
+// and `gesture_threat: None` on every emitted event (verified at lines 410-412
+// of this file). It does NOT contribute real face/voice/gesture risk to
+// `compute_perceptual_risk` in `alarm_grader_agent`.
+//
+// Production camera/edge path:
+//   vision_agent (RTSP / FastVLM caption) -> perceive_service :8094 (b450)
+//   -> compute_perceptual_risk in alarm_grader_agent
+// fully wired since SEN-15 D-full (2026-05-10). See os/112 §3.3.
+//
+// Use this binary only on the lab path (`nuclear-scout` iPhone companion
+// running ad-hoc detections in dev/QA). Do NOT depend on it in retail
+// Sentinelle deployments until either:
+//   (a) it forwards real L1 perception via the perceive_service contract, OR
+//   (b) it is explicitly re-scoped to a different ingestion model.
+//
+// Tracked as AUD-112-P1-5 in os/PLAN.md.
+
 use anyhow::{Context, Result};
 use axum::{
     extract::State,
