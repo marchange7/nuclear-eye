@@ -29,6 +29,10 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::{broadcast, Mutex};
 use tracing::{info, warn};
 
+// SEN-12: optional PG persistence (feature-gated on `alarm_pg`).
+#[cfg(feature = "alarm_pg")]
+mod alarm_pg;
+
 const CONSUL_TIMEOUT_MS: u64 = 80;
 /// Default AUDIT_LOG_PATH — matches audit.rs constant.
 const DEFAULT_AUDIT_LOG_PATH: &str = "/var/log/nuclear-eye/audit.jsonl";
@@ -238,6 +242,12 @@ async fn main() -> Result<()> {
                 ),
             }
         }
+    }
+
+    // SEN-12: eager pool init (fail-soft) so first alarm doesn't pay init latency.
+    #[cfg(feature = "alarm_pg")]
+    if std::env::var("SENTINELLE_PERSIST_ALARMS").unwrap_or_default().trim() == "1" {
+        alarm_pg::init_pool().await;
     }
 
     let state = AppState {
@@ -1027,6 +1037,19 @@ async fn process_event(
         }
     }
 
+    // ── SEN-12: PG persistence (fire-and-forget, opt-in via SENTINELLE_PERSIST_ALARMS=1) ──
+    #[cfg(feature = "alarm_pg")]
+    {
+        let alarm_clone = alarm.clone();
+        tokio::spawn(async move {
+            if let Some(pool) = alarm_pg::get_pool().await {
+                if let Err(e) = alarm_pg::insert_alarm(pool, &alarm_clone).await {
+                    tracing::warn!(error = %e, "SEN-12: PG insert failed (non-blocking)");
+                }
+            }
+        });
+    }
+
     // Synthesize voice alert for High alarms via nuclear-voice-client.
     let audio_b64 = if alarm.level == AlarmLevel::High {
         if let Some(vc) = nuclear_voice_client::VoiceClient::from_env() {
@@ -1467,8 +1490,8 @@ pub fn compute_perceptual_risk(
 //                VisionEvent carries face_negative / voice_agitated / gesture_threat fields.
 // TODO(SEN-6): wrapper fail-closed — alarm_grader_agent runs unguarded when nuclear-wrapper
 //              is unreachable; fail-closed mode required for production — see os/PLAN2.md §8
-// TODO(SEN-12): alarm verdict not written to sentinelle_alarms PG table; chain publish only.
-//               acknowledged_at / acknowledged_by columns not persisted — see os/PLAN2.md §8
+// SEN-12 closed: optional PG persist via SENTINELLE_PERSIST_ALARMS=1 + DATABASE_URL.
+//               See src/bin/alarm_pg.rs. acknowledged_at / acknowledged_by deferred to SEN-12.2.
 // TODO: replace with nk.fortress().ingest_security() once SecurityEvent type
 //       alignment with the fortress mesh endpoint is confirmed.
 async fn publish_to_mesh(alarm: &AlarmEvent, triad: &AffectTriad, decision: &str, fortress_url: &str, api_token: &str) {
