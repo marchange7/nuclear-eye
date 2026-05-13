@@ -1,6 +1,6 @@
 [app]
 bind_alarm_grader = "127.0.0.1:8780"
-bind_safetyagent = "127.0.0.1:8081"
+bind_safetyagent = "127.0.0.1:8088"
 bind_face_db = "127.0.0.1:8087"
 alarm_grader_url = "http://127.0.0.1:8780"
 face_db_path = "data/face_db.sqlite"
