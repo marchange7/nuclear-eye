@@ -23,7 +23,7 @@ auto_create = true
 
 [vision]
 tick_ms = 2500
-default_camera_id = "front-door"
+default_camera_id = "ssc-cabled-ch1"
 target_url = "http://127.0.0.1:8780/ingest"
 
 [fortress]
