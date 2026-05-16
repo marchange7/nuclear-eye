@@ -67,3 +67,45 @@ jobs:
           NUCLEAR_WRAPPER_URL: ""
           FASTVLM_DISABLED: "true"
           NUCLEAR_ENV: test
+
+  # SE-7 (os/110 §7) — schema-hash drift gate.
+  # Fails if src/alert/envelope.rs's `schema-hash:` header no longer matches
+  # nuclear-sdk/schemas/sentinelle-alert.v1.json's sha256. Catches the
+  # "developer edited the schema but didn't regen consumer artifacts"
+  # failure mode that would otherwise silently ship a stale alert envelope.
+  schema-drift:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Shallow-clone nuclear-sdk for canonical schema
+        run: git clone --depth 1 https://github.com/marchange7/nuclear-sdk.git /tmp/nuclear-sdk
+
+      - name: Verify sentinelle-alert Rust artifact in sync with canonical schema
+        run: |
+          set -euo pipefail
+          ARTIFACT=src/alert/envelope.rs
+          SCHEMA=/tmp/nuclear-sdk/schemas/sentinelle-alert.v1.json
+
+          if [[ ! -f "$ARTIFACT" ]]; then
+            echo "ERROR: artifact $ARTIFACT not found in checkout"
+            exit 1
+          fi
+
+          canon=$(sha256sum "$SCHEMA" | awk '{print $1}')
+          header=$(grep -m1 -E '^// schema-hash:' "$ARTIFACT" | awk '{print $3}')
+
+          echo "  canonical: $canon"
+          echo "  header:    $header"
+
+          if [[ "$canon" != "$header" ]]; then
+            echo ""
+            echo "ERROR: schema-hash drift — $ARTIFACT is stale."
+            echo "  expected: $canon (nuclear-sdk/schemas/sentinelle-alert.v1.json)"
+            echo "  found:    $header (in artifact header)"
+            echo ""
+            echo "Regenerate: cd ../nuclear-sdk && bash scripts/gen-schema-types.sh"
+            echo "Then copy the updated artifact to nuclear-eye/src/alert/ + commit."
+            exit 1
+          fi
+          echo "  ✓ in sync"
