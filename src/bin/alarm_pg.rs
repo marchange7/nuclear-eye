@@ -1,3 +1,13 @@
+//! SEN-12 RESOLUTION (2026-05-17): the canonical alarm-persistence path is now
+//! the **gateway** (sentinelle/services/gateway/src/index.ts /api/alerts/ingest).
+//! This Rust path is kept as a backup for any future direct-to-PG scenario;
+//! it is NOT called by alarm_grader_agent today.
+//!
+//! When the gateway INSERT lands, this file's INSERT_SQL is intentionally
+//! out of sync with the current schema (missing the 2026-05-17 columns).
+//! Either re-sync this file or delete it if the backup path is permanently
+//! unneeded.
+
 // SEN-12: optional PG persistence for alarm verdicts.
 //
 // Opt-in via env vars:
