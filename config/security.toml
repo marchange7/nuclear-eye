@@ -25,6 +25,15 @@ auto_create = true
 tick_ms = 2500
 default_camera_id = "ssc-cabled-ch1"
 target_url = "http://127.0.0.1:8780/ingest"
+# Real-feed mode: pull JPEG frames from the camera-adapter (host 127.0.0.1:8093
+# -> container :8090). The adapter returns a JSON envelope with a
+# data:image/jpeg;base64 `url`; vision_agent decodes it (see capture_and_analyze).
+# Set VISION_ALLOW_SYNTHETIC=false in the service env to disable synthetic events.
+# CAMERA_SNAPSHOT_URL / FASTVLM_URL env vars override these.
+snapshot_url = "http://127.0.0.1:8093/api/snapshot/ssc-cabled-ch1"
+# FastVLM /describe lives on :8091 (the :8092 snapshot service has no /describe).
+# Requires FASTVLM_API_TOKEN in the service env (the /describe route is auth-gated).
+fastvlm_url = "http://127.0.0.1:8091"
 
 [fortress]
 url = "http://localhost:7700"

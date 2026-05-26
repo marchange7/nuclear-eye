@@ -363,10 +363,30 @@ async fn capture_and_analyze(
         return None;
     }
 
-    let image_bytes = resp.bytes().await
+    // The snapshot source may be either:
+    //   (a) a raw `image/jpeg` body (legacy camera_server / main.py `/snapshot/{id}`), or
+    //   (b) the camera-adapter JSON envelope
+    //       `{camera_id, timestamp, url:"data:image/jpeg;base64,...", width, height, format}`.
+    // Pick the decode path from the response Content-Type so the same binary
+    // works against both. Without this, pointing CAMERA_SNAPSHOT_URL at the
+    // camera-adapter would feed base64(JSON) to FastVLM instead of a JPEG.
+    let content_type = resp
+        .headers()
+        .get(reqwest::header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("")
+        .to_ascii_lowercase();
+
+    let body = resp.bytes().await
         .map_err(|e| warn!("snapshot.body.failed: {e}"))
         .ok()?
         .to_vec();
+
+    let image_bytes = if content_type.contains("application/json") {
+        decode_snapshot_envelope(&body)?
+    } else {
+        body
+    };
 
     let caption = describe_image(fastvlm_url, &image_bytes).await?;
     info!("vlm.caption: {caption}");
@@ -405,6 +425,44 @@ async fn capture_and_analyze(
     }
 
     Some(event)
+}
+
+/// Decode the camera-adapter JSON snapshot envelope into raw JPEG bytes.
+///
+/// Shape: `{ "url": "data:image/jpeg;base64,<b64>", ... }`. Some adapters
+/// instead carry the base64 under `image_b64`/`jpeg_b64`/`data`. Returns the
+/// decoded bytes, or `None` (with a warn) if no recognizable image field is
+/// present or the base64 is malformed.
+fn decode_snapshot_envelope(body: &[u8]) -> Option<Vec<u8>> {
+    use base64::Engine;
+    let json: serde_json::Value = serde_json::from_slice(body)
+        .map_err(|e| warn!("snapshot.json.parse_failed: {e}"))
+        .ok()?;
+
+    // Prefer a `data:` URL field; fall back to bare base64 fields.
+    let b64: String = if let Some(u) = json.get("url").and_then(|v| v.as_str()) {
+        match u.split_once("base64,") {
+            Some((_, payload)) => payload.to_string(),
+            // A plain http(s) URL would require a second fetch; not supported here.
+            None => {
+                warn!("snapshot.json.url_not_data_uri");
+                return None;
+            }
+        }
+    } else if let Some(b) = json.get("image_b64").and_then(|v| v.as_str())
+        .or_else(|| json.get("jpeg_b64").and_then(|v| v.as_str()))
+        .or_else(|| json.get("data").and_then(|v| v.as_str()))
+    {
+        b.to_string()
+    } else {
+        warn!("snapshot.json.no_image_field");
+        return None;
+    };
+
+    base64::engine::general_purpose::STANDARD
+        .decode(b64.trim())
+        .map_err(|e| warn!("snapshot.json.b64_decode_failed: {e}"))
+        .ok()
 }
 
 async fn describe_image(fastvlm_url: &str, image_bytes: &[u8]) -> Option<String> {
