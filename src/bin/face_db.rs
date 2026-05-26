@@ -518,6 +518,24 @@ fn init_sqlite(conn: &Connection) -> Result<()> {
             Err(e) => tracing::warn!(error = %e, "face_db tenant index creation warning (non-fatal)"),
         }
     }
+
+    // Composite UNIQUE indexes that match the `ON CONFLICT` targets used by
+    // FaceStore::upsert_face (tenant_id, name) and store_embedding
+    // (tenant_id, face_name). SQLite requires a UNIQUE index whose columns
+    // exactly match the conflict target, otherwise the upsert raises and the
+    // HTTP layer reports the generic "upsert face (sqlite)" error. The base
+    // schema only declares bare-column UNIQUE constraints (name / face_name),
+    // which do NOT satisfy a composite conflict target. CREATE ... IF NOT
+    // EXISTS is safe on existing DBs (b450 picks these up on next restart).
+    for sql in [
+        "CREATE UNIQUE INDEX IF NOT EXISTS uq_faces_tenant_name ON faces(tenant_id, name)",
+        "CREATE UNIQUE INDEX IF NOT EXISTS uq_face_embeddings_tenant_name ON face_embeddings(tenant_id, face_name)",
+    ] {
+        match conn.execute_batch(sql) {
+            Ok(_) => {}
+            Err(e) => tracing::warn!(error = %e, "face_db composite unique index creation warning (non-fatal)"),
+        }
+    }
     Ok(())
 }
 
@@ -526,4 +544,65 @@ fn unix_now_secs() -> i64 {
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs() as i64
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use uuid::Uuid;
+
+    /// Regression: the SQLite schema built by `init_sqlite()` must support the
+    /// `ON CONFLICT(tenant_id, name)` / `ON CONFLICT(tenant_id, face_name)`
+    /// upserts in `FaceStore`. Before the composite UNIQUE indexes were added,
+    /// enroll returned the generic "upsert face (sqlite)" error and embeds
+    /// stored nothing. This test enrolls a face + embedding through the *real*
+    /// init schema and reads them back. (The face_store.rs round-trip test
+    /// builds its own schema, so it never exercised init_sqlite.)
+    #[tokio::test]
+    async fn init_sqlite_supports_upsert_and_embed_round_trip() {
+        let conn = Connection::open_in_memory().unwrap();
+        init_sqlite(&conn).unwrap();
+        let store = FaceStore::from_sqlite(conn);
+        let tenant = Uuid::nil();
+
+        // Enroll (the path that previously failed with "upsert face (sqlite)").
+        assert!(store
+            .upsert_face(
+                tenant,
+                &FaceRecord {
+                    name: "alice".into(),
+                    embedding_hint: "red coat".into(),
+                    authorized: true,
+                },
+            )
+            .await
+            .unwrap());
+
+        // Upsert again to confirm ON CONFLICT(tenant_id, name) actually fires.
+        assert!(store
+            .upsert_face(
+                tenant,
+                &FaceRecord {
+                    name: "alice".into(),
+                    embedding_hint: "blue coat".into(),
+                    authorized: false,
+                },
+            )
+            .await
+            .unwrap());
+
+        let found = store.find_face(tenant, "alice").await.unwrap().unwrap();
+        assert_eq!(found.embedding_hint, "blue coat");
+        assert!(!found.authorized);
+
+        // Store + re-store an embedding (the /faces/embed path, stored_for).
+        let blob = vec![7u8; 2048];
+        assert!(store.store_embedding(tenant, "alice", &blob, 512).await.unwrap());
+        assert!(store.store_embedding(tenant, "alice", &blob, 512).await.unwrap());
+
+        let embeddings = store.load_embeddings(tenant).await.unwrap();
+        assert_eq!(embeddings.len(), 1);
+        assert_eq!(embeddings[0].name, "alice");
+        assert_eq!(embeddings[0].embedding.len(), 2048);
+    }
 }
