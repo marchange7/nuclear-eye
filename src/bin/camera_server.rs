@@ -15,7 +15,7 @@
 
 use std::process::Stdio;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use axum::{
     body::Body,
@@ -28,7 +28,11 @@ use axum::{
 use tokio::sync::RwLock;
 use tracing::{info, warn};
 
-type FrameStore = Arc<RwLock<Option<Vec<u8>>>>;
+// Frame bytes + the instant the frame was captured, so /readyz can detect a
+// dead camera. capture_loop keeps the previous frame on failure (so /snapshot
+// stays usable), but the timestamp stops advancing — which is exactly what a
+// freshness-aware liveness probe needs to flag a wedged/offline camera.
+type FrameStore = Arc<RwLock<Option<(Vec<u8>, Instant)>>>;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -73,6 +77,7 @@ async fn main() -> anyhow::Result<()> {
         .route("/snapshot", get(serve_snapshot))
         .route("/snapshot/{cam_id}", get(serve_snapshot_cam))
         .route("/health", get(health))
+        .route("/readyz", get(readyz))
         .with_state(frame);
 
     info!("camera_server listening on {bind}");
@@ -93,7 +98,7 @@ async fn capture_loop(url: String, interval: Duration, store: FrameStore) {
 
         match maybe_frame {
             Some(bytes) => {
-                *store.write().await = Some(bytes);
+                *store.write().await = Some((bytes, Instant::now()));
             }
             None => {
                 warn!("capture tick failed — keeping previous frame");
@@ -156,7 +161,7 @@ async fn capture_http(url: &str) -> Option<Vec<u8>> {
 async fn serve_snapshot(State(store): State<FrameStore>) -> Response {
     let guard = store.read().await;
     match guard.as_ref() {
-        Some(bytes) => Response::builder()
+        Some((bytes, _ts)) => Response::builder()
             .status(StatusCode::OK)
             .header(header::CONTENT_TYPE, "image/jpeg")
             .header(header::CACHE_CONTROL, "no-cache, no-store")
@@ -181,13 +186,54 @@ async fn serve_snapshot_cam(
 }
 
 async fn health(State(store): State<FrameStore>) -> (StatusCode, Json<serde_json::Value>) {
-    let frame_ready = store.read().await.is_some();
+    let age_ms = store
+        .read()
+        .await
+        .as_ref()
+        .map(|(_, ts)| ts.elapsed().as_millis() as u64);
     (
         StatusCode::OK,
         Json(serde_json::json!({
             "ok": true,
             "service": "camera_server",
-            "frame_ready": frame_ready,
+            "frame_ready": age_ms.is_some(),
+            "last_frame_age_ms": age_ms,
         })),
     )
+}
+
+/// Freshness-aware liveness probe (mirrors camera-adapter /readyz).
+/// /health always returns 200 (process up) and /snapshot keeps serving the last
+/// frame even after the camera dies — so neither detects a wedged/offline
+/// camera. /readyz returns 503 when there is no frame yet, or the newest frame
+/// is older than CAMERA_FRESHNESS_SEC (default 10s). Wire monitors + the Docker
+/// HEALTHCHECK at /readyz so a dead camera is actually surfaced/healed.
+async fn readyz(State(store): State<FrameStore>) -> (StatusCode, Json<serde_json::Value>) {
+    let freshness_ms: u64 = std::env::var("CAMERA_FRESHNESS_SEC")
+        .ok()
+        .and_then(|s| s.parse::<f64>().ok())
+        .map(|s| (s * 1000.0) as u64)
+        .unwrap_or(10_000);
+    let age_ms = store
+        .read()
+        .await
+        .as_ref()
+        .map(|(_, ts)| ts.elapsed().as_millis() as u64);
+    match age_ms {
+        Some(age) if age <= freshness_ms => (
+            StatusCode::OK,
+            Json(serde_json::json!({ "ready": true, "last_frame_age_ms": age })),
+        ),
+        Some(age) => (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(serde_json::json!({
+                "ready": false, "reason": "frame_stale",
+                "last_frame_age_ms": age, "threshold_ms": freshness_ms,
+            })),
+        ),
+        None => (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(serde_json::json!({ "ready": false, "reason": "no_frame_yet" })),
+        ),
+    }
 }
