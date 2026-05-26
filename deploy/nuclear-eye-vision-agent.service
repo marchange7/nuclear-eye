@@ -14,10 +14,17 @@ Environment=RUST_LOG=info
 Environment=HOUSE_SECURITY_CONFIG=/data/git/nuclear-eye/config/security.toml
 Environment=NUCLEAR_WRAPPER_URL=http://127.0.0.1:9091
 Environment=WRAPPER_REQUIRED=1
-# Set SNAPSHOT_URL to enable real camera mode (e.g. http://m4:8085/snapshot)
-# Set FASTVLM_URL to enable VLM captioning  (e.g. http://127.0.0.1:8091)
-# Leave both unset to run synthetic test events
+# Real-feed mode (cabled cameras .88/.85 via the camera-adapter on 127.0.0.1:8093).
+# The adapter returns a JSON envelope with a data:image/jpeg;base64 `url`;
+# vision_agent decodes it, then captions via FastVLM /describe on :8091.
+#   CAMERA_SNAPSHOT_URL : .../api/snapshot/ssc-cabled-ch1 (.88) or .../ssc-cabled-ch2 (.85)
+#   FASTVLM_URL         : http://127.0.0.1:8091 (the :8092 service has no /describe)
+#   FASTVLM_API_TOKEN   : required — /describe is auth-gated (set in EnvironmentFile, not here)
+#   VISION_ALLOW_SYNTHETIC=false : refuse to emit mock events
+# Defaults below also live in config/security.toml [vision]; env wins.
+Environment=CAMERA_SNAPSHOT_URL=http://127.0.0.1:8093/api/snapshot/ssc-cabled-ch1
 Environment=FASTVLM_URL=http://127.0.0.1:8091
+Environment=VISION_ALLOW_SYNTHETIC=false
 ExecStart=/data/git/nuclear-eye/target/release/vision_agent
 Restart=on-failure
 RestartSec=5s
