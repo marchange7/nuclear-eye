@@ -351,9 +351,17 @@ async fn capture_and_analyze(
     fastvlm_url: &str,
     camera_id: &str,
 ) -> Option<VisionEvent> {
+    // The sentinelle camera-adapter pulls frames from RTSP via ffmpeg; a cold
+    // grab (no warm cache entry) can take ~4-5s, longer than the old hardcoded
+    // 3s. That timeout fired on every refresh window and starved real-feed mode
+    // of frames. Default to 8s and allow tuning via CAMERA_SNAPSHOT_TIMEOUT_MS.
+    let snapshot_timeout_ms: u64 = std::env::var("CAMERA_SNAPSHOT_TIMEOUT_MS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(8000);
     let resp = client
         .get(snapshot_url)
-        .timeout(Duration::from_secs(3))
+        .timeout(Duration::from_millis(snapshot_timeout_ms))
         .send().await
         .map_err(|e| warn!("snapshot.get.failed: {e}"))
         .ok()?;
