@@ -1,5 +1,5 @@
 [Unit]
-Description=Nuclear Eye — Vision Agent (synthetic → real camera via SNAPSHOT_URL)
+Description=Nuclear Eye — Vision Agent (DEFAULT synthetic; real is a throttled opt-in)
 Documentation=https://github.com/marchange7/nuclear-eye
 After=network.target nuclear-eye-alarm-grader.service
 Wants=nuclear-eye-alarm-grader.service
@@ -9,22 +9,25 @@ Type=simple
 User=crew
 Group=crew
 WorkingDirectory=/data/git/nuclear-eye
-EnvironmentFile=-/home/crew/.config/nuclear-eye/env
 Environment=RUST_LOG=info
 Environment=HOUSE_SECURITY_CONFIG=/data/git/nuclear-eye/config/security.toml
 Environment=NUCLEAR_WRAPPER_URL=http://127.0.0.1:9091
 Environment=WRAPPER_REQUIRED=1
-# Real-feed mode (cabled cameras .88/.85 via the camera-adapter on 127.0.0.1:8093).
-# The adapter returns a JSON envelope with a data:image/jpeg;base64 `url`;
-# vision_agent decodes it, then captions via FastVLM /describe on :8091.
-#   CAMERA_SNAPSHOT_URL : .../api/snapshot/ssc-cabled-ch1 (.88) or .../ssc-cabled-ch2 (.85)
-#   FASTVLM_URL         : http://127.0.0.1:8091 (the :8092 service has no /describe)
-#   FASTVLM_API_TOKEN   : required — /describe is auth-gated (set in EnvironmentFile, not here)
-#   VISION_ALLOW_SYNTHETIC=false : refuse to emit mock events
-# Defaults below also live in config/security.toml [vision]; env wins.
-Environment=CAMERA_SNAPSHOT_URL=http://127.0.0.1:8093/api/snapshot/ssc-cabled-ch1
-Environment=FASTVLM_URL=http://127.0.0.1:8091
-Environment=VISION_ALLOW_SYNTHETIC=false
+# DEFAULT: synthetic — safe on constrained hosts. Real-feed mode at the default
+# 2.5s vision tick overloads the b450 dev box (AMD B450 + RTX 2060: a FastVLM
+# caption + RTSP snapshot grab every 2.5s starved sshd, 2026-05-26) and MUST be
+# throttled. To OPT IN to real vision, set the following in the EnvironmentFile
+# below — it is loaded LAST so it overrides this synthetic default — per
+# nuclear-deploy/profiles/sentinelle/REAL-VISION-THROTTLE.md:
+#   CAMERA_SNAPSHOT_URL=http://127.0.0.1:8093/api/snapshot/ssc-cabled-ch1  (.88; ch2=.85)
+#   FASTVLM_URL=http://127.0.0.1:8091          (:8092 has no /describe)
+#   FASTVLM_API_TOKEN=<token>                  (/describe is auth-gated)
+#   VISION_ALLOW_SYNTHETIC=false
+#   VISION_TICK_MS=20000  +  OMP_NUM_THREADS=4  (+ camera-adapter SNAPSHOT_CACHE_MS=30000)
+# A real GPU host can run real mode at the full 2500ms (config/security.toml [vision]).
+Environment=VISION_ALLOW_SYNTHETIC=true
+# Loaded LAST so operator opt-in (real + throttle) overrides the synthetic default above.
+EnvironmentFile=-/home/crew/.config/nuclear-eye/env
 ExecStart=/data/git/nuclear-eye/target/release/vision_agent
 Restart=on-failure
 RestartSec=5s
