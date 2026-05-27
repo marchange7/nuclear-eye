@@ -13,6 +13,7 @@ use tokio_stream::StreamExt as _;
 use nuclear_eye::{
     decide, AffectTriad, ConsulClient, DecisionAction, SecurityConfig, VisionEvent,
 };
+use nuclear_eye::behavior::{apply_repetition, RepetitionTracker};
 use nuclear_eye::memory::SecurityMemory;
 use nuclear_sdk::NuclearClient;
 use serde::{Deserialize, Serialize};
@@ -34,6 +35,9 @@ struct AppState {
     nk: NuclearClient,
     /// L2: SSE broadcast for `/debug/decisions`.
     debug_tx: Arc<broadcast::Sender<String>>,
+    /// Phase A: repeat-sighting tracker — repeated detections of the same
+    /// person/behavior within the window escalate risk toward Alarm.
+    repetition: Arc<Mutex<RepetitionTracker>>,
 }
 
 // ── Request / Response types ───────────────────────────────────────────
@@ -122,6 +126,8 @@ async fn main() -> Result<()> {
         memory: memory.clone(),
         nk: nk.clone(),
         debug_tx,
+        // 5-minute window, escalate after the 3rd sighting of the same key.
+        repetition: Arc::new(Mutex::new(RepetitionTracker::new(300_000, 3))),
     };
 
     // ── Background health check via SDK ──────────────────────────────────
@@ -212,7 +218,7 @@ async fn handle_decide(
     State(state): State<AppState>,
     payload: Result<Json<DecideRequest>, axum::extract::rejection::JsonRejection>,
 ) -> Result<Json<DecisionResponse>, (StatusCode, Json<ErrorBody>)> {
-    let Json(req) = payload.map_err(|err| {
+    let Json(mut req) = payload.map_err(|err| {
         warn!(%err, "bad request");
         (
             StatusCode::BAD_REQUEST,
@@ -221,6 +227,20 @@ async fn handle_decide(
     })?;
 
     tracing::Span::current().record("event_id", req.event.event_id.as_str());
+
+    // Phase A: repetition escalation — repeated sightings of the same person /
+    // behavior within the window raise risk BEFORE the triad + safety-critical
+    // check, so a returning intruder trends toward Alarm.
+    {
+        let key = repetition_key(&req.event);
+        let mut tracker = state.repetition.lock().unwrap();
+        tracker.observe(&key, req.event.timestamp_ms);
+        let boost = tracker.repetition_boost(&key, req.event.timestamp_ms);
+        if boost > 0.0 {
+            req.event.risk_score = apply_repetition(req.event.risk_score, boost);
+            info!(key, boost, risk = req.event.risk_score, "repetition escalation applied");
+        }
+    }
 
     let triad = AffectTriad::from_vision_event(&req.event);
     let is_safety_critical = req
@@ -331,4 +351,76 @@ async fn debug_decisions_sse(
         Err(_)   => None,
     });
     Sse::new(stream).keep_alive(KeepAlive::default())
+}
+
+/// Build the repetition-tracking key for an event: prefer a recognized person,
+/// then the behavior tag (per camera), else the camera id.
+fn repetition_key(ev: &VisionEvent) -> String {
+    match ev.person_name.as_deref().filter(|s| !s.is_empty()) {
+        Some(name) => format!("person:{name}"),
+        None if !ev.behavior.is_empty() => format!("behavior:{}@{}", ev.behavior, ev.camera_id),
+        None => format!("cam:{}", ev.camera_id),
+    }
+}
+
+#[cfg(test)]
+mod wiring_tests {
+    use super::*;
+
+    fn ev(person: Option<&str>, behavior: &str, cam: &str, ts: u64) -> VisionEvent {
+        VisionEvent {
+            event_id: format!("e-{ts}"),
+            timestamp_ms: ts,
+            camera_id: cam.to_string(),
+            behavior: behavior.to_string(),
+            risk_score: 0.2,
+            stress_level: 0.0,
+            confidence: 0.9,
+            person_detected: person.is_some(),
+            person_name: person.map(|s| s.to_string()),
+            hands_visible: 0,
+            object_held: None,
+            extra_tags: vec![],
+            vlm_caption: None,
+            depth_context: None,
+            face_negative: None,
+            voice_agitated: None,
+            gesture_threat: None,
+        }
+    }
+
+    #[test]
+    fn key_prefers_person_name() {
+        assert_eq!(repetition_key(&ev(Some("intruder-A"), "loitering", "cam1", 1)), "person:intruder-A");
+    }
+
+    #[test]
+    fn key_falls_back_to_behavior() {
+        assert_eq!(repetition_key(&ev(None, "loitering", "cam1", 1)), "behavior:loitering@cam1");
+    }
+
+    #[test]
+    fn key_falls_back_to_camera() {
+        assert_eq!(repetition_key(&ev(None, "", "cam1", 1)), "cam:cam1");
+    }
+
+    #[test]
+    fn repeated_sightings_escalate_risk() {
+        let mut t = RepetitionTracker::new(300_000, 3);
+        let key = "person:intruder-A";
+        t.observe(key, 1000);
+        t.observe(key, 2000);
+        t.observe(key, 3000);
+        let boost = t.repetition_boost(key, 3000);
+        assert!(boost > 0.0, "3rd sighting within window should boost");
+        let risk = apply_repetition(0.2, boost);
+        assert!(risk > 0.2 && risk <= 1.0);
+    }
+
+    #[test]
+    fn single_sighting_no_escalation() {
+        let mut t = RepetitionTracker::new(300_000, 3);
+        t.observe("person:x", 1000);
+        assert_eq!(t.repetition_boost("person:x", 1000), 0.0);
+    }
 }
