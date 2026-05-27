@@ -2,6 +2,7 @@ pub mod alert;
 pub mod audit;
 pub mod perceive_client;
 pub mod consul;
+pub mod enrollment;
 pub mod face_db_auth;
 pub mod face_embedding;
 pub mod face_store;
