@@ -16,6 +16,7 @@ use axum::{
 use tokio_stream::wrappers::BroadcastStream;
 use tokio_stream::StreamExt as _;
 use nuclear_eye::{decide, riviere, AffectTriad, AlarmEvent, AlarmGrader, AlarmLevel, AlarmSummary, ConsulClient, SecurityConfig, VisionEvent};
+use nuclear_eye::{audio_threat, voiceprint};
 use nuclear_eye::memory::SecurityMemory;
 use nuclear_eye::alert::{
     AlertChainEnvelope, AlertConfidence, AlertDegraded, AlertEvent as CanonicalEvent,
@@ -330,6 +331,13 @@ async fn process_event(
     state: AppState,
     event: VisionEvent,
 ) -> Json<serde_json::Value> {
+    // Phase A: voice signals. An upstream audio tagger (YAMNet) + voiceprint
+    // service feed audio-threat events + a captured voice embedding; fold them
+    // into the event before grading. Empty/None here = no-op until that source
+    // is wired (audio agent), matching the perceive bypass pattern.
+    let event = apply_audio_threat(event, &[]);
+    let event = apply_voiceprint(event, None, &[]);
+
     // Local grading is synchronous and fast — do it under the lock, then
     // release before any I/O so we never block other ingest calls.
     let mut alarm = {
@@ -1889,5 +1897,112 @@ mod risk_tests {
         ids.push_back("alarm-overflow".to_string());
         assert!(!ids.contains(&"alarm-0".to_string()), "oldest alarm should be evicted");
         assert!(ids.contains(&"alarm-overflow".to_string()), "new alarm should be present");
+    }
+}
+
+// ── Phase A: voice signal helpers ──────────────────────────────────────────
+
+/// Fold YAMNet-style audio-threat events into the event's `voice_agitated`
+/// signal (max with any existing value), so scream/glass/gunshot raise the
+/// perceptual risk the grader already reads.
+fn apply_audio_threat(mut event: VisionEvent, audio: &[audio_threat::AudioEvent]) -> VisionEvent {
+    if let Some(va) = audio_threat::to_voice_agitated(audio_threat::threat_score(audio)) {
+        event.voice_agitated = Some(event.voice_agitated.map_or(va, |cur| cur.max(va)));
+    }
+    event
+}
+
+/// Match a captured voice embedding against the voice watchlist. On a hit, set
+/// `person_name` (if empty) and adjust `risk_score` by the hit's risk delta
+/// (Family suppresses, Watch/Offender escalate).
+fn apply_voiceprint(
+    mut event: VisionEvent,
+    voice_emb: Option<&[f32]>,
+    watchlist: &[voiceprint::VoiceprintEntry],
+) -> VisionEvent {
+    if let Some(emb) = voice_emb {
+        if let Some(hit) =
+            voiceprint::match_voice(emb, watchlist, voiceprint::DEFAULT_VOICE_MATCH_THRESHOLD)
+        {
+            if event.person_name.as_deref().map_or(true, |s| s.is_empty()) {
+                event.person_name = Some(hit.label.clone());
+            }
+            event.risk_score = (event.risk_score + hit.risk_delta() as f64).clamp(0.0, 1.0);
+        }
+    }
+    event
+}
+
+#[cfg(test)]
+mod voice_wiring_tests {
+    use super::*;
+    use nuclear_eye::audio_threat::AudioEvent;
+    use nuclear_eye::voiceprint::{VoiceStatus, VoiceprintEntry};
+
+    fn vev() -> VisionEvent {
+        VisionEvent {
+            event_id: "e1".into(),
+            timestamp_ms: 1,
+            camera_id: "cam1".into(),
+            behavior: "passby".into(),
+            risk_score: 0.2,
+            stress_level: 0.0,
+            confidence: 0.9,
+            person_detected: false,
+            person_name: None,
+            hands_visible: 0,
+            object_held: None,
+            extra_tags: vec![],
+            vlm_caption: None,
+            depth_context: None,
+            face_negative: None,
+            voice_agitated: None,
+            gesture_threat: None,
+        }
+    }
+
+    fn vp(id: &str, status: VoiceStatus, threat: u8, emb: Vec<f32>) -> VoiceprintEntry {
+        VoiceprintEntry { id: id.into(), label: id.into(), status, threat_level: threat, embedding: emb }
+    }
+
+    #[test]
+    fn scream_raises_voice_agitated() {
+        let ev = apply_audio_threat(vev(), &[AudioEvent { label: "scream".into(), score: 0.9 }]);
+        assert!(ev.voice_agitated.unwrap_or(0.0) > 0.0);
+    }
+
+    #[test]
+    fn benign_audio_no_false_alarm() {
+        let ev = apply_audio_threat(vev(), &[AudioEvent { label: "music".into(), score: 0.9 }]);
+        assert!(ev.voice_agitated.unwrap_or(0.0) <= 0.0);
+    }
+
+    #[test]
+    fn no_audio_unchanged() {
+        let ev = apply_audio_threat(vev(), &[]);
+        assert!(ev.voice_agitated.unwrap_or(0.0) <= 0.0);
+    }
+
+    #[test]
+    fn offender_voiceprint_raises_risk_and_names() {
+        let emb = vec![1.0, 0.0, 0.0, 0.0];
+        let wl = vec![vp("intruder", VoiceStatus::Offender, 80, emb.clone())];
+        let ev = apply_voiceprint(vev(), Some(&emb), &wl);
+        assert_eq!(ev.person_name.as_deref(), Some("intruder"));
+        assert!(ev.risk_score > 0.2);
+    }
+
+    #[test]
+    fn family_voiceprint_suppresses_risk() {
+        let emb = vec![0.0, 1.0, 0.0, 0.0];
+        let wl = vec![vp("mum", VoiceStatus::Family, 0, emb.clone())];
+        let ev = apply_voiceprint(vev(), Some(&emb), &wl);
+        assert!(ev.risk_score < 0.2);
+    }
+
+    #[test]
+    fn no_embedding_unchanged() {
+        let ev = apply_voiceprint(vev(), None, &[]);
+        assert!((ev.risk_score - 0.2).abs() < 1e-9 && ev.person_name.is_none());
     }
 }
