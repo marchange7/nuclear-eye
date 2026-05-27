@@ -1,8 +1,9 @@
 pub mod alert;
-pub mod audio_threat;
 pub mod audit;
+pub mod behavior;
 pub mod perceive_client;
 pub mod consul;
+pub mod detector;
 pub mod face_db_auth;
 pub mod face_embedding;
 pub mod face_store;
@@ -12,6 +13,9 @@ pub mod memory;
 pub mod riviere;
 pub mod runtime;
 pub mod types;
+pub mod watchlist;
+pub mod enrollment;
+pub mod audio_threat;
 pub mod voiceprint;
 pub mod wrapper_guard;
 
