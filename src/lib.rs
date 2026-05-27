@@ -1,4 +1,5 @@
 pub mod alert;
+pub mod audio_threat;
 pub mod audit;
 pub mod perceive_client;
 pub mod consul;
@@ -11,6 +12,7 @@ pub mod memory;
 pub mod riviere;
 pub mod runtime;
 pub mod types;
+pub mod voiceprint;
 pub mod wrapper_guard;
 
 pub use consul::{ConsulClient, ConsulDecision};
