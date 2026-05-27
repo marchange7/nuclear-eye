@@ -15,6 +15,8 @@ pub mod runtime;
 pub mod types;
 pub mod watchlist;
 pub mod enrollment;
+pub mod audio_threat;
+pub mod voiceprint;
 pub mod wrapper_guard;
 
 pub use consul::{ConsulClient, ConsulDecision};
