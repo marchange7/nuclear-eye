@@ -11,6 +11,7 @@ pub mod memory;
 pub mod riviere;
 pub mod runtime;
 pub mod types;
+pub mod watchlist;
 pub mod wrapper_guard;
 
 pub use consul::{ConsulClient, ConsulDecision};
