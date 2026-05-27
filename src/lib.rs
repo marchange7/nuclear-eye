@@ -1,5 +1,6 @@
 pub mod alert;
 pub mod audit;
+pub mod behavior;
 pub mod perceive_client;
 pub mod consul;
 pub mod detector;
