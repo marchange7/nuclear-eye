@@ -6,6 +6,8 @@ use axum::{
     Router,
 };
 use nuclear_eye::{caption_to_vision_event, now_ms, SecurityConfig, VisionEvent};
+use nuclear_eye::behavior::fuse_risk;
+use nuclear_eye::detector::{DetectorBackend, HttpDetector, Zone, should_invoke_vlm_default};
 use nuclear_eye::memory::SecurityMemory;
 use nuclear_eye::perceive_client::{perceive_url_from_env, perceive_frame_only};
 use reqwest::Client;
@@ -396,6 +398,23 @@ async fn capture_and_analyze(
         body
     };
 
+    // Phase 2: detector gate — the always-on detector decides whether this frame
+    // is worth the heavy FastVLM caption. DETECTOR_URL unset → gate disabled
+    // (caption every frame, status quo). Detector unreachable → fail OPEN
+    // (caption anyway; a down detector must never blind the camera).
+    if detector_enabled() {
+        match HttpDetector::new(client.clone()).detect(&image_bytes).await {
+            Ok(dets) => {
+                if !should_invoke_vlm_default(&dets, &gate_zones()) {
+                    info!(camera_id, "detector: no relevant hit — skipping FastVLM");
+                    return None;
+                }
+                info!(camera_id, n = dets.len(), "detector: relevant hit — invoking FastVLM");
+            }
+            Err(e) => warn!(camera_id, error = %e, "detector unreachable — failing open"),
+        }
+    }
+
     let caption = describe_image(fastvlm_url, &image_bytes).await?;
     info!("vlm.caption: {caption}");
     let mut event = caption_to_vision_event(camera_id, &caption, now_ms());
@@ -431,6 +450,12 @@ async fn capture_and_analyze(
             }
         }
     }
+
+    // Phase 3: fold the multimodal behavior signals (face emotion, gesture
+    // threat, voice agitation) into a single fused risk score so the grader /
+    // decision path sees one number. watchlist_delta = 0.0 until face-embedding
+    // watchlist matching is wired here (encrypted-DB phase).
+    enrich_risk(&mut event, 0.0);
 
     Some(event)
 }
@@ -493,4 +518,93 @@ async fn describe_image(fastvlm_url: &str, image_bytes: &[u8]) -> Option<String>
     let resp = req.send().await.ok()?;
     let json: serde_json::Value = resp.json().await.ok()?;
     json["caption"].as_str().map(|s| s.to_string())
+}
+
+// ── Phase 2/3 wiring helpers ───────────────────────────────────────────────
+
+/// True when a detector service is configured (`DETECTOR_URL` set + non-empty).
+/// When false, the FastVLM gate is disabled and every frame is captioned.
+fn detector_enabled() -> bool {
+    std::env::var("DETECTOR_URL")
+        .ok()
+        .map(|s| !s.trim().is_empty())
+        .unwrap_or(false)
+}
+
+/// Zones guarding the FastVLM gate. With no operator-configured zones we guard
+/// the whole frame (0..1), so ANY relevant detection (person/vehicle) fires the
+/// VLM — "detector always-on → caption on any real hit".
+fn gate_zones() -> Vec<Zone> {
+    vec![Zone::new(
+        "full-frame",
+        vec![(0.0, 0.0), (1.0, 0.0), (1.0, 1.0), (0.0, 1.0)],
+    )]
+}
+
+/// Fold the multimodal behavior signals (+ optional watchlist delta) into the
+/// event's risk score via `behavior::fuse_risk`.
+fn enrich_risk(event: &mut VisionEvent, watchlist_delta: f64) {
+    event.risk_score = fuse_risk(
+        event.risk_score,
+        event.face_negative,
+        event.gesture_threat,
+        event.voice_agitated,
+        watchlist_delta,
+    );
+}
+
+#[cfg(test)]
+mod wiring_tests {
+    use super::*;
+    use nuclear_eye::detector::{BBox, Detection};
+
+    fn det(class: &str, conf: f32) -> Detection {
+        Detection::new(class, conf, BBox::new(0.4, 0.4, 0.1, 0.2))
+    }
+
+    #[test]
+    fn gate_opens_on_person_full_frame() {
+        assert!(should_invoke_vlm_default(&[det("person", 0.9)], &gate_zones()));
+    }
+
+    #[test]
+    fn gate_opens_on_vehicle_full_frame() {
+        assert!(should_invoke_vlm_default(&[det("car", 0.8)], &gate_zones()));
+    }
+
+    #[test]
+    fn gate_closed_on_irrelevant_class() {
+        assert!(!should_invoke_vlm_default(&[det("cat", 0.95)], &gate_zones()));
+    }
+
+    #[test]
+    fn gate_closed_on_low_confidence() {
+        assert!(!should_invoke_vlm_default(&[det("person", 0.10)], &gate_zones()));
+    }
+
+    #[test]
+    fn gate_closed_on_empty() {
+        assert!(!should_invoke_vlm_default(&[], &gate_zones()));
+    }
+
+    #[test]
+    fn enrich_risk_raises_with_signals() {
+        let mut ev = build_event(0, "cam1");
+        ev.risk_score = 0.10;
+        ev.gesture_threat = Some(0.9);
+        ev.face_negative = Some(0.8);
+        enrich_risk(&mut ev, 0.3);
+        assert!(ev.risk_score > 0.10 && ev.risk_score <= 1.0);
+    }
+
+    #[test]
+    fn enrich_risk_unchanged_without_signals() {
+        let mut ev = build_event(0, "cam1");
+        ev.risk_score = 0.20;
+        ev.gesture_threat = None;
+        ev.face_negative = None;
+        ev.voice_agitated = None;
+        enrich_risk(&mut ev, 0.0);
+        assert!((ev.risk_score - 0.20).abs() < 1e-9);
+    }
 }
