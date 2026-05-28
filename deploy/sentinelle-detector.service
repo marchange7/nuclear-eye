@@ -1,0 +1,18 @@
+[Unit]
+Description=Sentinelle Detector — always-on object detector (YOLOX/NanoDet) for the vision_agent FastVLM gate (:18094)
+Documentation=https://github.com/marchange7/nuclear-eye
+After=network.target
+
+[Service]
+Type=simple
+User=crew
+Group=crew
+WorkingDirectory=/data/git/nuclear-eye
+# Set DETECTOR_MODEL_PATH (real ONNX) or DETECTOR_MOCK=1 (dev) here:
+EnvironmentFile=-/etc/nuclear/sentinelle-detector.env
+ExecStart=/data/venvs/nuclear-eye/bin/python -m uvicorn detector_service:app --host 127.0.0.1 --port 18094
+Restart=on-failure
+RestartSec=5s
+
+[Install]
+WantedBy=multi-user.target
