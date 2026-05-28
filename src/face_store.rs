@@ -47,6 +47,9 @@ pub struct EmbeddingRow {
     pub name: String,
     pub embedding_hint: String,
     pub authorized: bool,
+    /// Watchlist taxonomy: "authorized" (family/suppress) | "watch" | "offender"
+    /// (escalate). Surfaced on every match so the risk pipeline can act on it.
+    pub status: String,
     /// Plaintext little-endian float32 bytes (2048 bytes for ArcFace 512-dim).
     pub embedding: Vec<u8>,
 }
@@ -218,6 +221,40 @@ impl FaceStore {
         }
     }
 
+    /// Set the watchlist status ("authorized" | "watch" | "offender") on an
+    /// existing face row. Returns true when a row was updated.
+    pub async fn set_face_status(&self, tenant: Uuid, name: &str, status: &str) -> Result<bool> {
+        match self {
+            FaceStore::Sqlite(conn) => {
+                let tenant_str = tenant.to_string();
+                let conn = conn.lock().await;
+                let n = conn
+                    .execute(
+                        "UPDATE faces SET status = ?3 WHERE tenant_id = ?1 AND name = ?2",
+                        params![tenant_str, name, status],
+                    )
+                    .context("set_face_status (sqlite)")?;
+                Ok(n > 0)
+            }
+            #[cfg(feature = "face_db_pg")]
+            FaceStore::Postgres { pool, require_tenant_header, .. } => {
+                let mut tx = pool.begin().await.context("begin tx (set_face_status)")?;
+                set_tenant(&mut tx, tenant, *require_tenant_header).await?;
+                let res = sqlx::query(
+                    "UPDATE face_db.faces SET status = $2 WHERE tenant_id = $1 AND name = $3",
+                )
+                .bind(tenant)
+                .bind(status)
+                .bind(name)
+                .execute(&mut *tx)
+                .await
+                .context("set_face_status (postgres)")?;
+                tx.commit().await.context("commit (set_face_status)")?;
+                Ok(res.rows_affected() > 0)
+            }
+        }
+    }
+
     /// Encrypt + store an embedding for an existing face. Returns true when
     /// the face row exists (and the embedding was written), false otherwise.
     pub async fn store_embedding(
@@ -287,7 +324,8 @@ impl FaceStore {
                 let conn = conn.lock().await;
                 let mut stmt = conn
                     .prepare(
-                        "SELECT fe.face_name, fe.embedding, f.embedding_hint, f.authorized
+                        "SELECT fe.face_name, fe.embedding, f.embedding_hint, f.authorized,
+                                COALESCE(f.status, 'watch')
                            FROM face_embeddings fe
                            JOIN faces f ON f.name = fe.face_name AND f.tenant_id = fe.tenant_id
                            WHERE fe.tenant_id = ?1
@@ -301,6 +339,7 @@ impl FaceStore {
                             embedding: row.get(1)?,
                             embedding_hint: row.get(2)?,
                             authorized: row.get::<_, i64>(3)? != 0,
+                            status: row.get(4)?,
                         })
                     })
                     .context("query load_embeddings (sqlite)")?;
@@ -312,11 +351,12 @@ impl FaceStore {
                 set_tenant(&mut tx, tenant, *require_tenant_header).await?;
                 set_encryption_key(&mut tx, encryption_key).await?;
 
-                let rows = sqlx::query_as::<_, (String, Vec<u8>, String, bool)>(
+                let rows = sqlx::query_as::<_, (String, Vec<u8>, String, bool, String)>(
                     "SELECT f.name,
                             face_db.get_embedding(fe.face_id),
                             f.embedding_hint,
-                            f.authorized
+                            f.authorized,
+                            COALESCE(f.status, 'watch')
                        FROM face_db.face_embeddings fe
                        JOIN face_db.faces f ON f.id = fe.face_id
                        ORDER BY f.name",
@@ -328,11 +368,12 @@ impl FaceStore {
                 tx.commit().await.context("commit (load_embeddings)")?;
                 Ok(rows
                     .into_iter()
-                    .map(|(name, embedding, hint, authorized)| EmbeddingRow {
+                    .map(|(name, embedding, hint, authorized, status)| EmbeddingRow {
                         name,
                         embedding,
                         embedding_hint: hint,
                         authorized,
+                        status,
                     })
                     .collect())
             }
