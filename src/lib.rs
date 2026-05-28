@@ -4,6 +4,7 @@ pub mod behavior;
 pub mod perceive_client;
 pub mod consul;
 pub mod detector;
+pub mod perimeter;
 pub mod face_db_auth;
 pub mod face_embedding;
 pub mod face_store;
