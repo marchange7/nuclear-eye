@@ -70,12 +70,27 @@ struct EmbedRequest {
     face_name: Option<String>,
 }
 
+/// One-call enrollment: register a face row + its ArcFace embedding + watchlist
+/// status in a single request (vs the legacy POST /faces then POST /faces/embed).
+#[derive(Debug, Deserialize)]
+struct EnrollFaceRequest {
+    /// Face label, e.g. "alice" or "offender-1234".
+    name: String,
+    /// Base64-encoded JPEG or PNG containing exactly one face.
+    image_b64: String,
+    /// Watchlist status: "authorized" (family/suppress) | "watch" (default) |
+    /// "offender" (escalate). Defaults to "watch" when omitted.
+    status: Option<String>,
+}
+
 /// Result from biometric image search (O4).
 #[derive(Debug, Serialize)]
 struct BiometricSearchResult {
     name: String,
     embedding_hint: String,
     authorized: bool,
+    /// Watchlist status: "authorized" (family) | "watch" | "offender".
+    status: String,
     /// Cosine similarity to the query embedding (0.0–1.0).
     similarity: f32,
     /// True when similarity ≥ 0.28 (ArcFace same-person threshold).
@@ -190,6 +205,7 @@ async fn main() -> Result<()> {
         // Q4: Lucky7 health probe
         .route("/health", get(|| async { axum::Json(serde_json::json!({"status":"ok","service":"face_db"})) }))
         .route("/faces", get(list_faces).post(add_face))
+        .route("/faces/enroll", post(enroll_face))
         // Z10: text-hint search removed — ArcFace-only identity. Use /faces/search-by-image.
         .route("/faces/search", post(search_faces_removed))
         .route("/faces/embed", post(embed_face))
@@ -281,6 +297,65 @@ async fn add_face(
     audit("add_face", ctx.tenant_id);
     let upserted = state.store.upsert_face(ctx.tenant_id, &input).await.map_err(internal)?;
     Ok(Json(serde_json::json!({"upserted": upserted})))
+}
+
+/// POST /faces/enroll — one-call enrollment: ArcFace embed + face row + status.
+async fn enroll_face(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(req): Json<EnrollFaceRequest>,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
+    let ctx = guard(&state, &headers)?;
+    audit("enroll_face", ctx.tenant_id);
+
+    let status_str = req.status.as_deref().unwrap_or("watch");
+    let ws = match nuclear_eye::enrollment::WatchStatus::parse(status_str) {
+        Some(w) => w,
+        None => {
+            return Ok(Json(serde_json::json!({
+                "ok": false,
+                "error": format!("invalid status '{status_str}' (authorized|watch|offender)"),
+            })))
+        }
+    };
+    if req.name.trim().is_empty() {
+        return Ok(Json(serde_json::json!({"ok": false, "error": "name is required"})));
+    }
+
+    // 1) ArcFace embedding via the sidecar.
+    let embedding = match face_embedding::embed(&state.http, &req.image_b64).await {
+        Ok(e) => e,
+        Err(e) => {
+            return Ok(Json(serde_json::json!({
+                "ok": false,
+                "error": e.to_string(),
+                "hint": "Is face_embedding_service.py reachable at FACE_EMBED_URL (:5555) and is a face present?",
+            })))
+        }
+    };
+    let dims = embedding.len();
+
+    // 2) Upsert the face row (authorized derived from status; ArcFace-only -> empty hint).
+    let rec = FaceRecord {
+        name: req.name.clone(),
+        embedding_hint: String::new(),
+        authorized: matches!(ws, nuclear_eye::enrollment::WatchStatus::Authorized),
+    };
+    state.store.upsert_face(ctx.tenant_id, &rec).await.map_err(internal)?;
+
+    // 3) Set the full watchlist status, then store the embedding.
+    state.store.set_face_status(ctx.tenant_id, &req.name, ws.as_str()).await.map_err(internal)?;
+    let blob = face_embedding::embedding_to_bytes(&embedding);
+    let stored = state.store.store_embedding(ctx.tenant_id, &req.name, &blob, dims).await.map_err(internal)?;
+
+    info!(face = %req.name, status = ws.as_str(), dims, "enrolled face");
+    Ok(Json(serde_json::json!({
+        "ok": stored,
+        "name": req.name,
+        "status": ws.as_str(),
+        "authorized": rec.authorized,
+        "dims": dims,
+    })))
 }
 
 // ── T9: GDPR retention endpoints ────────────────────────────────────────────
@@ -429,6 +504,7 @@ async fn search_by_image(
                 name: row.name,
                 embedding_hint: row.embedding_hint,
                 authorized: row.authorized,
+                status: row.status,
                 similarity: sim,
                 likely_match: sim >= threshold,
             })
@@ -487,6 +563,9 @@ fn init_sqlite(conn: &Connection) -> Result<()> {
     for sql in [
         "ALTER TABLE faces ADD COLUMN created_at INTEGER NOT NULL DEFAULT (strftime('%s','now'))",
         "ALTER TABLE faces ADD COLUMN last_matched_at INTEGER",
+        // Watchlist taxonomy (family-suppress / offender-escalate). 'watch' = default
+        // (enrolled-but-neutral); 'authorized' = family; 'offender' = escalate.
+        "ALTER TABLE faces ADD COLUMN status TEXT NOT NULL DEFAULT 'watch'",
     ] {
         match conn.execute_batch(sql) {
             Ok(_) => {}
@@ -604,5 +683,14 @@ mod tests {
         assert_eq!(embeddings.len(), 1);
         assert_eq!(embeddings[0].name, "alice");
         assert_eq!(embeddings[0].embedding.len(), 2048);
+        // status defaults to 'watch' until set (enrollment path).
+        assert_eq!(embeddings[0].status, "watch");
+
+        // set_face_status (the enroll endpoint's status step) surfaces on match.
+        assert!(store.set_face_status(tenant, "alice", "offender").await.unwrap());
+        let after = store.load_embeddings(tenant).await.unwrap();
+        assert_eq!(after[0].status, "offender");
+        // unknown face → no row updated.
+        assert!(!store.set_face_status(tenant, "ghost", "offender").await.unwrap());
     }
 }
