@@ -7,7 +7,8 @@ use axum::{
 };
 use nuclear_eye::{caption_to_vision_event, now_ms, SecurityConfig, VisionEvent};
 use nuclear_eye::behavior::fuse_risk;
-use nuclear_eye::detector::{DetectorBackend, HttpDetector, Zone, should_invoke_vlm_default};
+use nuclear_eye::detector::{DetectorBackend, HttpDetector, should_invoke_vlm_default};
+use nuclear_eye::perimeter::{PerimeterAssessment, PerimeterMap};
 use nuclear_eye::memory::SecurityMemory;
 use nuclear_eye::perceive_client::{perceive_url_from_env, perceive_frame_only};
 use reqwest::Client;
@@ -402,14 +403,26 @@ async fn capture_and_analyze(
     // is worth the heavy FastVLM caption. DETECTOR_URL unset → gate disabled
     // (caption every frame, status quo). Detector unreachable → fail OPEN
     // (caption anyway; a down detector must never blind the camera).
+    // Operator-defined security perimeter for this camera (zones + arming).
+    // Unset config → a single armed full-frame perimeter (prior behaviour).
+    let perimeter = PerimeterMap::load_for(camera_id);
+    let mut perimeter_assess: Option<PerimeterAssessment> = None;
     if detector_enabled() {
         match HttpDetector::new(client.clone()).detect(&image_bytes).await {
             Ok(dets) => {
-                if !should_invoke_vlm_default(&dets, &gate_zones()) {
-                    info!(camera_id, "detector: no relevant hit — skipping FastVLM");
+                if !should_invoke_vlm_default(&dets, &perimeter.gate_zones()) {
+                    info!(camera_id, "detector: no relevant hit in any zone — skipping FastVLM");
                     return None;
                 }
-                info!(camera_id, n = dets.len(), "detector: relevant hit — invoking FastVLM");
+                let assess = perimeter.evaluate(&dets);
+                info!(
+                    camera_id,
+                    n = dets.len(),
+                    zones = ?assess.zone_tags,
+                    spatial_risk = assess.risk_delta,
+                    "detector: relevant hit — invoking FastVLM"
+                );
+                perimeter_assess = Some(assess);
             }
             Err(e) => warn!(camera_id, error = %e, "detector unreachable — failing open"),
         }
@@ -451,11 +464,25 @@ async fn capture_and_analyze(
         }
     }
 
+    // Spatial reasoning: tag the event with the zones the actor occupied and
+    // fold the perimeter's spatial risk delta into the fused score. This is the
+    // "thinks in zones, not events" layer (os/117 gap #1).
+    let spatial_delta = if let Some(a) = &perimeter_assess {
+        for t in &a.zone_tags {
+            if !event.extra_tags.contains(t) {
+                event.extra_tags.push(t.clone());
+            }
+        }
+        a.risk_delta as f64
+    } else {
+        0.0
+    };
+
     // Phase 3: fold the multimodal behavior signals (face emotion, gesture
-    // threat, voice agitation) into a single fused risk score so the grader /
-    // decision path sees one number. watchlist_delta = 0.0 until face-embedding
-    // watchlist matching is wired here (encrypted-DB phase).
-    enrich_risk(&mut event, 0.0);
+    // threat, voice agitation) + spatial perimeter delta into a single fused
+    // risk score so the grader / decision path sees one number. watchlist_delta
+    // is added once face-embedding watchlist matching is wired here.
+    enrich_risk(&mut event, spatial_delta);
 
     Some(event)
 }
@@ -531,16 +558,6 @@ fn detector_enabled() -> bool {
         .unwrap_or(false)
 }
 
-/// Zones guarding the FastVLM gate. With no operator-configured zones we guard
-/// the whole frame (0..1), so ANY relevant detection (person/vehicle) fires the
-/// VLM — "detector always-on → caption on any real hit".
-fn gate_zones() -> Vec<Zone> {
-    vec![Zone::new(
-        "full-frame",
-        vec![(0.0, 0.0), (1.0, 0.0), (1.0, 1.0), (0.0, 1.0)],
-    )]
-}
-
 /// Fold the multimodal behavior signals (+ optional watchlist delta) into the
 /// event's risk score via `behavior::fuse_risk`.
 fn enrich_risk(event: &mut VisionEvent, watchlist_delta: f64) {
@@ -560,6 +577,11 @@ mod wiring_tests {
 
     fn det(class: &str, conf: f32) -> Detection {
         Detection::new(class, conf, BBox::new(0.4, 0.4, 0.1, 0.2))
+    }
+
+    /// Default full-frame gate zones (no operator config) for gate tests.
+    fn gate_zones() -> Vec<nuclear_eye::detector::Zone> {
+        PerimeterMap::full_frame("test").gate_zones()
     }
 
     #[test]
