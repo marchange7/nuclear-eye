@@ -243,11 +243,13 @@ async fn capture_http(url: &str) -> Option<Vec<u8>> {
 
 // ── HTTP handlers ─────────────────────────────────────────────────────────────
 
-fn jpeg_response(bytes: &[u8]) -> Response {
+fn jpeg_response(bytes: &[u8], age_ms: u64) -> Response {
     Response::builder()
         .status(StatusCode::OK)
         .header(header::CONTENT_TYPE, "image/jpeg")
         .header(header::CACHE_CONTROL, "no-cache, no-store")
+        // Frame freshness so consumers (vision_agent) can skip a wedged/stale feed.
+        .header("X-Frame-Age-Ms", age_ms.to_string())
         .body(Body::from(bytes.to_vec()))
         .unwrap()
 }
@@ -265,7 +267,7 @@ async fn serve_cam(state: &AppState, cam_id: &str) -> Response {
         return json_status(StatusCode::NOT_FOUND, r#"{"error":"unknown camera"}"#);
     };
     match store.read().await.as_ref() {
-        Some((bytes, _ts)) => jpeg_response(bytes),
+        Some((bytes, ts)) => jpeg_response(bytes, ts.elapsed().as_millis() as u64),
         None => json_status(StatusCode::SERVICE_UNAVAILABLE, r#"{"error":"no frame available"}"#),
     }
 }

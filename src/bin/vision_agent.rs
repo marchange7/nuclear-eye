@@ -388,6 +388,26 @@ async fn capture_and_analyze(
         .unwrap_or("")
         .to_ascii_lowercase();
 
+    // BUG-013 follow-up: skip analysis on a STALE frame (camera feed wedged).
+    // camera_server stamps X-Frame-Age-Ms on /snapshot; if the newest frame is
+    // older than CAMERA_STALE_SKIP_MS (default 15s) the camera is down/frozen, so
+    // analyzing it would score a stale image. Skip rather than alarm on a ghost.
+    let stale_skip_ms: u64 = std::env::var("CAMERA_STALE_SKIP_MS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(15_000);
+    if let Some(age) = resp
+        .headers()
+        .get("x-frame-age-ms")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|s| s.parse::<u64>().ok())
+    {
+        if age > stale_skip_ms {
+            warn!(camera_id, age_ms = age, "snapshot stale (camera feed wedged) — skipping analysis");
+            return None;
+        }
+    }
+
     let body = resp.bytes().await
         .map_err(|e| warn!("snapshot.body.failed: {e}"))
         .ok()?
@@ -478,11 +498,27 @@ async fn capture_and_analyze(
         0.0
     };
 
+    // Watchlist: when a person is in frame, match their face against face_db and
+    // fold the family-suppress / offender-escalate delta into the risk. Closes
+    // the os/117 #4 "enrollment doesn't affect alarms yet" gap (watchlist_delta
+    // was hardcoded 0.0). Fail-open: a down face_db never blocks the pipeline.
+    let watchlist_delta = if event.person_detected {
+        let (d, tag) = watchlist_check(client, &image_bytes).await;
+        if let Some(t) = tag {
+            info!(camera_id, watchlist = %t, delta = d, "watchlist: face match");
+            if !event.extra_tags.contains(&t) {
+                event.extra_tags.push(t);
+            }
+        }
+        d
+    } else {
+        0.0
+    };
+
     // Phase 3: fold the multimodal behavior signals (face emotion, gesture
-    // threat, voice agitation) + spatial perimeter delta into a single fused
-    // risk score so the grader / decision path sees one number. watchlist_delta
-    // is added once face-embedding watchlist matching is wired here.
-    enrich_risk(&mut event, spatial_delta);
+    // threat, voice agitation) + spatial perimeter delta + watchlist delta into a
+    // single fused risk score so the grader / decision path sees one number.
+    enrich_risk(&mut event, spatial_delta + watchlist_delta);
 
     Some(event)
 }
@@ -556,6 +592,54 @@ fn detector_enabled() -> bool {
         .ok()
         .map(|s| !s.trim().is_empty())
         .unwrap_or(false)
+}
+
+/// face_db base URL (the watchlist / biometric store). `FACE_DB_URL` overrides.
+fn face_db_url() -> String {
+    std::env::var("FACE_DB_URL").unwrap_or_else(|_| "http://127.0.0.1:8087".to_string())
+}
+
+/// Match the in-frame face against face_db's watchlist and map the result to a
+/// risk delta + tag. Returns `(0.0, None)` on no-match / face_db down (fail-open).
+/// Status→delta mirrors `watchlist::WatchlistHit::risk_delta`:
+/// authorized (family) suppresses, watch is mild, offender escalates.
+async fn watchlist_check(client: &Client, image_bytes: &[u8]) -> (f64, Option<String>) {
+    use base64::Engine;
+    let b64 = base64::engine::general_purpose::STANDARD.encode(image_bytes);
+    let url = format!("{}/faces/search-by-image", face_db_url());
+    let req = serde_json::json!({ "image_b64": b64, "min_similarity": 0.28, "limit": 1 });
+    let resp = match client
+        .post(&url)
+        .json(&req)
+        .timeout(Duration::from_millis(2500))
+        .send()
+        .await
+    {
+        Ok(r) if r.status().is_success() => r,
+        Ok(r) => {
+            warn!(status = %r.status(), "watchlist: face_db non-success — skipping");
+            return (0.0, None);
+        }
+        Err(e) => {
+            warn!(error = %e, "watchlist: face_db unreachable — skipping (fail-open)");
+            return (0.0, None);
+        }
+    };
+    let results: Vec<serde_json::Value> = resp.json().await.unwrap_or_default();
+    let Some(top) = results
+        .into_iter()
+        .find(|r| r["likely_match"].as_bool().unwrap_or(false))
+    else {
+        return (0.0, None);
+    };
+    let status = top["status"].as_str().unwrap_or("watch");
+    let name = top["name"].as_str().unwrap_or("?");
+    let delta = match status {
+        "authorized" => -0.5, // family/staff — suppress
+        "offender" => 0.5,    // escalate
+        _ => 0.30,            // watch (enrolled-but-neutral)
+    };
+    (delta, Some(format!("watchlist:{status}:{name}")))
 }
 
 /// Fold the multimodal behavior signals (+ optional watchlist delta) into the
