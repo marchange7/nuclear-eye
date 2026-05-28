@@ -503,12 +503,16 @@ async fn capture_and_analyze(
     // the os/117 #4 "enrollment doesn't affect alarms yet" gap (watchlist_delta
     // was hardcoded 0.0). Fail-open: a down face_db never blocks the pipeline.
     let watchlist_delta = if event.person_detected {
-        let (d, tag) = watchlist_check(client, &image_bytes).await;
-        if let Some(t) = tag {
-            info!(camera_id, watchlist = %t, delta = d, "watchlist: face match");
-            if !event.extra_tags.contains(&t) {
-                event.extra_tags.push(t);
+        let (d, hit) = watchlist_check(client, &image_bytes).await;
+        if let Some((status, name)) = hit {
+            let tag = format!("watchlist:{status}:{name}");
+            info!(camera_id, watchlist = %tag, delta = d, "watchlist: face match");
+            if !event.extra_tags.contains(&tag) {
+                event.extra_tags.push(tag);
             }
+            // Recognized identity → person_name feeds the canonical alert's
+            // IdentityMatch evidence (alarm_grader build_canonical_alert).
+            event.person_name = Some(name);
         }
         d
     } else {
@@ -600,10 +604,10 @@ fn face_db_url() -> String {
 }
 
 /// Match the in-frame face against face_db's watchlist and map the result to a
-/// risk delta + tag. Returns `(0.0, None)` on no-match / face_db down (fail-open).
-/// Status→delta mirrors `watchlist::WatchlistHit::risk_delta`:
+/// risk delta + `(status, name)`. Returns `(0.0, None)` on no-match / face_db
+/// down (fail-open). Status→delta mirrors `watchlist::WatchlistHit::risk_delta`:
 /// authorized (family) suppresses, watch is mild, offender escalates.
-async fn watchlist_check(client: &Client, image_bytes: &[u8]) -> (f64, Option<String>) {
+async fn watchlist_check(client: &Client, image_bytes: &[u8]) -> (f64, Option<(String, String)>) {
     use base64::Engine;
     let b64 = base64::engine::general_purpose::STANDARD.encode(image_bytes);
     let url = format!("{}/faces/search-by-image", face_db_url());
@@ -639,7 +643,7 @@ async fn watchlist_check(client: &Client, image_bytes: &[u8]) -> (f64, Option<St
         "offender" => 0.5,    // escalate
         _ => 0.30,            // watch (enrolled-but-neutral)
     };
-    (delta, Some(format!("watchlist:{status}:{name}")))
+    (delta, Some((status.to_string(), name.to_string())))
 }
 
 /// Fold the multimodal behavior signals (+ optional watchlist delta) into the

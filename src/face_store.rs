@@ -620,6 +620,7 @@ mod tests {
                 name TEXT NOT NULL,
                 embedding_hint TEXT NOT NULL,
                 authorized INTEGER NOT NULL DEFAULT 0,
+                status TEXT NOT NULL DEFAULT 'watch',
                 created_at INTEGER NOT NULL DEFAULT (strftime('%s','now')),
                 last_matched_at INTEGER,
                 UNIQUE(tenant_id, name)
