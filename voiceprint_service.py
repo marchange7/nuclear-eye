@@ -85,12 +85,49 @@ def _mock_embedding(raw: bytes) -> list[float]:
     return [v / norm for v in vals]
 
 
+def _decode_audio_16k_mono(raw: bytes):
+    """Decode arbitrary WAV/FLAC/OGG bytes -> float32 mono @ 16 kHz in [-1, 1]."""
+    import io
+    import numpy as np
+    import soundfile as sf
+    data, sr = sf.read(io.BytesIO(raw), dtype="float32", always_2d=False)
+    if data.ndim > 1:
+        data = data.mean(axis=1)
+    if sr != 16000:
+        import librosa
+        data = librosa.resample(data, orig_sr=sr, target_sr=16000)
+    return np.ascontiguousarray(data, dtype=np.float32)
+
+
+def _compute_fbank(wav16k):
+    """80-dim log-mel fbank approximating WeSpeaker/kaldi (25 ms / 10 ms, HTK mel,
+    20-8000 Hz), then per-utterance cepstral mean normalization (CMN). -> [T, 80].
+    CMN cancels the constant log-offset between kaldi int16-scale and float input."""
+    import numpy as np
+    import librosa
+    mel = librosa.feature.melspectrogram(
+        y=wav16k, sr=16000, n_fft=512, win_length=400, hop_length=160,
+        n_mels=80, fmin=20, fmax=8000, power=2.0, htk=True, center=True,
+    )
+    logmel = np.log(np.maximum(mel, 1e-10)).T  # [T, 80]
+    logmel = logmel - logmel.mean(axis=0, keepdims=True)  # CMN
+    return logmel.astype(np.float32)
+
+
 def _run_onnx(session, raw: bytes) -> list[float]:
-    """REAL ECAPA inference. Preprocess (resample 16k mono -> mel/fbank) +
-    forward + L2-normalise are model-export specific and validated against the
-    actual ONNX at deploy time; until then MOCK is the smoke path. [] on failure."""
+    """REAL ECAPA inference: WAV -> 16k mono -> 80-d fbank+CMN -> ONNX forward ->
+    L2-normalized 192-d embedding. [] on failure (caller treats as no voice match)."""
     try:
-        return []
+        import numpy as np
+        wav = _decode_audio_16k_mono(raw)
+        if wav.size < 400:  # < 25 ms — too short for one frame
+            return []
+        feats = _compute_fbank(wav)[None, ...]  # [1, T, 80]
+        inp = session.get_inputs()[0].name
+        embs = session.run(None, {inp: feats})[0]  # [1, 192]
+        emb = np.asarray(embs[0], dtype=np.float32)
+        norm = float(np.linalg.norm(emb)) or 1.0
+        return (emb / norm).tolist()
     except Exception:
         return []
 
