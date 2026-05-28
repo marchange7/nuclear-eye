@@ -22,8 +22,8 @@ Modes:
             can be smoke-tested end-to-end before weights are deployed.
 
 Run:
-    DETECTOR_MOCK=1 uvicorn detector_service:app --host 127.0.0.1 --port 8094
-    DETECTOR_MODEL_PATH=/data/models/yolox/yolox_nano.onnx uvicorn detector_service:app --port 8094
+    DETECTOR_MOCK=1 uvicorn detector_service:app --host 127.0.0.1 --port 18094
+    DETECTOR_MODEL_PATH=/data/models/yolox/yolox_nano.onnx uvicorn detector_service:app --port 18094
 
 Deps: fastapi, uvicorn, pillow, numpy, onnxruntime (real mode only).
 
