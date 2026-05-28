@@ -165,11 +165,30 @@ async fn capture_loop(url: String, interval: Duration, store: FrameStore) {
 }
 
 /// Grab one JPEG frame from an RTSP stream using ffmpeg.
+///
+/// Bounded so a dead/slow camera can NEVER hang the capture loop (the bug that
+/// froze a feed for 7+ min when a camera dropped): `-rw_timeout` makes ffmpeg
+/// itself fail fast on a stalled connection, a tokio `timeout` is the backstop,
+/// and `kill_on_drop` reaps the child if the timeout fires. On any timeout/error
+/// we return None → the loop keeps the previous frame and retries next tick, so
+/// the feed self-heals the instant the camera comes back.
 async fn capture_rtsp(url: &str) -> Option<Vec<u8>> {
-    let output = tokio::process::Command::new("ffmpeg")
+    use tokio::time::{timeout, Duration};
+    // RTSP socket I/O timeout in microseconds (8s) — ffmpeg aborts a stalled
+    // connect/read. NB: the rtsp demuxer's option is `-timeout` (NOT `-rw_timeout`,
+    // which this ffmpeg build rejects with "Option rw_timeout not found").
+    let rw_timeout = std::env::var("CAMERA_FFMPEG_RW_TIMEOUT_US")
+        .unwrap_or_else(|_| "8000000".into());
+    let hard_timeout_s: u64 = std::env::var("CAMERA_FFMPEG_TIMEOUT_SEC")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(12);
+
+    let child = tokio::process::Command::new("ffmpeg")
         .args([
             "-loglevel", "error",
             "-rtsp_transport", "tcp",
+            "-timeout", &rw_timeout,
             "-i", url,
             "-vframes", "1",
             "-f", "image2pipe",
@@ -178,16 +197,28 @@ async fn capture_rtsp(url: &str) -> Option<Vec<u8>> {
         ])
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
-        .output()
-        .await
+        .kill_on_drop(true)
+        .spawn()
         .map_err(|e| warn!("ffmpeg spawn failed: {e}"))
         .ok()?;
 
-    if output.status.success() && !output.stdout.is_empty() {
-        Some(output.stdout)
-    } else {
-        warn!("ffmpeg exited with {:?} for {url}", output.status.code());
-        None
+    match timeout(Duration::from_secs(hard_timeout_s), child.wait_with_output()).await {
+        Ok(Ok(output)) if output.status.success() && !output.stdout.is_empty() => {
+            Some(output.stdout)
+        }
+        Ok(Ok(output)) => {
+            warn!("ffmpeg exited with {:?} for {url}", output.status.code());
+            None
+        }
+        Ok(Err(e)) => {
+            warn!("ffmpeg io error for {url}: {e}");
+            None
+        }
+        Err(_) => {
+            // child dropped here → kill_on_drop reaps the hung ffmpeg.
+            warn!("ffmpeg timed out after {hard_timeout_s}s ({url} unreachable) — killed");
+            None
+        }
     }
 }
 
