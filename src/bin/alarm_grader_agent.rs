@@ -1638,6 +1638,19 @@ fn build_canonical_alert(
     let severity = map_severity(&alarm.level, alarm.danger_score);
     let event_type = map_event_type(&event.behavior, event.vlm_caption.as_deref());
 
+    // vision_agent stamps perimeter + watchlist results into extra_tags:
+    //   "zone:<name>"            → canonical source.zone_id (spatial context)
+    //   "watchlist:<status>:..." → IdentityMatch evidence extra.watch_status
+    //                              (authorized=family / watch / offender=escalate)
+    let zone_id: Option<String> = event
+        .extra_tags
+        .iter()
+        .find_map(|t| t.strip_prefix("zone:").map(|z| z.to_string()));
+    let watch_status: Option<String> = event
+        .extra_tags
+        .iter()
+        .find_map(|t| t.strip_prefix("watchlist:").and_then(|r| r.split(':').next().map(str::to_string)));
+
     // Confidence components: vision (always) + face/voice/gesture when
     // perceive_service populated them (Phase 1).
     let mut components: BTreeMap<String, f32> = BTreeMap::new();
@@ -1683,10 +1696,22 @@ fn build_canonical_alert(
             "match_via".into(),
             serde_json::Value::String("vision_event.person_name".to_string()),
         );
+        // Watchlist taxonomy (family-suppress / offender-escalate) so the
+        // operator UI can color the recognized-identity chip by status.
+        if let Some(ws) = watch_status.as_ref() {
+            extra.insert("watch_status".into(), serde_json::Value::String(ws.clone()));
+        }
+        // Label encodes status when known ("offender:alice") so SDK consumers
+        // that only decode `label` (iOS, per the SDK's minimal AlertEvidence)
+        // still get the watchlist status; web reads the structured extra.
+        let id_label = match watch_status.as_ref() {
+            Some(ws) => format!("{ws}:{name}"),
+            None => name.clone(),
+        };
         evidence.push(AlertEvidence {
             kind: EvidenceKind::IdentityMatch,
             model: Some("face_db/arcface".to_string()),
-            label: Some(name.clone()),
+            label: Some(id_label),
             confidence: event.confidence as f32,
             frame_refs: vec![],
             redactions: vec![],
@@ -1773,7 +1798,7 @@ fn build_canonical_alert(
             source: AlertEventSource {
                 camera_id: Some(event.camera_id.clone()),
                 sensor_id: None,
-                zone_id: None,
+                zone_id: zone_id.clone(),
             },
             observed_at,
             duration_ms: None,
