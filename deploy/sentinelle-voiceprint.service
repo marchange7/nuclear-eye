@@ -1,0 +1,18 @@
+[Unit]
+Description=Sentinelle Voiceprint — ECAPA speaker-embedding sidecar for voice watchlist matching (:5557)
+Documentation=https://github.com/marchange7/nuclear-eye
+After=network.target
+
+[Service]
+Type=simple
+User=crew
+Group=crew
+WorkingDirectory=/data/git/nuclear-eye
+# Set VOICEPRINT_MODEL_PATH (real ECAPA ONNX) or VOICEPRINT_MOCK=1 (dev) here:
+EnvironmentFile=-/etc/nuclear/sentinelle-voiceprint.env
+ExecStart=/data/venvs/nuclear-eye/bin/python -m uvicorn voiceprint_service:app --host 127.0.0.1 --port 5557
+Restart=on-failure
+RestartSec=5s
+
+[Install]
+WantedBy=multi-user.target

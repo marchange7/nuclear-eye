@@ -1,0 +1,18 @@
+[Unit]
+Description=Sentinelle Audio-Threat — YAMNet tagger sidecar (scream/glass/gunshot -> voice_agitated) (:5558)
+Documentation=https://github.com/marchange7/nuclear-eye
+After=network.target
+
+[Service]
+Type=simple
+User=crew
+Group=crew
+WorkingDirectory=/data/git/nuclear-eye
+# Set YAMNET_MODEL_PATH (real YAMNet ONNX) or YAMNET_MOCK=1 (dev) here:
+EnvironmentFile=-/etc/nuclear/sentinelle-yamnet.env
+ExecStart=/data/venvs/nuclear-eye/bin/python -m uvicorn yamnet_service:app --host 127.0.0.1 --port 5558
+Restart=on-failure
+RestartSec=5s
+
+[Install]
+WantedBy=multi-user.target
