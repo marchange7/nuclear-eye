@@ -43,8 +43,26 @@ from pydantic import BaseModel
 
 MODEL_PATH = os.getenv("DETECTOR_MODEL_PATH", "")
 MOCK = os.getenv("DETECTOR_MOCK", "").lower() in ("1", "true", "yes")
+INPUT_SIZE = int(os.getenv("DETECTOR_INPUT_SIZE", "640"))  # yolox_s = 640; nano/tiny = 416
+NMS_IOU = float(os.getenv("DETECTOR_NMS_IOU", "0.45"))
 # COCO classes the security gate cares about (maps to detector.rs is_relevant_class).
 RELEVANT = {"person", "bicycle", "car", "motorcycle", "bus", "truck", "vehicle"}
+
+# COCO 80-class label order matching YOLOX class indices (Megvii export).
+COCO_CLASSES = (
+    "person", "bicycle", "car", "motorcycle", "airplane", "bus", "train", "truck",
+    "boat", "traffic light", "fire hydrant", "stop sign", "parking meter", "bench",
+    "bird", "cat", "dog", "horse", "sheep", "cow", "elephant", "bear", "zebra",
+    "giraffe", "backpack", "umbrella", "handbag", "tie", "suitcase", "frisbee",
+    "skis", "snowboard", "sports ball", "kite", "baseball bat", "baseball glove",
+    "skateboard", "surfboard", "tennis racket", "bottle", "wine glass", "cup",
+    "fork", "knife", "spoon", "bowl", "banana", "apple", "sandwich", "orange",
+    "broccoli", "carrot", "hot dog", "pizza", "donut", "cake", "chair", "couch",
+    "potted plant", "bed", "dining table", "toilet", "tv", "laptop", "mouse",
+    "remote", "keyboard", "cell phone", "microwave", "oven", "toaster", "sink",
+    "refrigerator", "book", "clock", "vase", "scissors", "teddy bear",
+    "hair drier", "toothbrush",
+)
 
 app = FastAPI(title="sentinelle-detector")
 
@@ -97,15 +115,123 @@ def _decode_dims(image_b64: str) -> Optional[tuple[int, int]]:
         return (1920, 1080)
 
 
+def _letterbox(img_rgb, size: int):
+    """Resize keeping aspect ratio, pad to (size,size) with 114 (YOLOX convention).
+    Returns (chw_float32[1,3,size,size], ratio) where ratio scales model px->orig px."""
+    import numpy as np
+    h, w = img_rgb.shape[:2]
+    r = min(size / h, size / w)
+    nh, nw = int(round(h * r)), int(round(w * r))
+    from PIL import Image
+    resized = np.asarray(
+        Image.fromarray(img_rgb).resize((nw, nh), Image.BILINEAR), dtype=np.float32
+    )
+    canvas = np.full((size, size, 3), 114.0, dtype=np.float32)
+    canvas[:nh, :nw, :] = resized
+    # YOLOX expects BGR, CHW, float32, NO /255 normalization.
+    bgr = canvas[:, :, ::-1]
+    chw = bgr.transpose(2, 0, 1)[None, ...].copy()
+    return chw, r
+
+
+def _decode_yolox(output, size: int, conf: float):
+    """Decode raw YOLOX output [1, N, 85] (grid+stride) -> (boxes_xyxy, scores, cls).
+    boxes are in model-input pixel space (pre-letterbox-undo)."""
+    import numpy as np
+    pred = output[0]  # [N, 85]
+    strides = (8, 16, 32)
+    grids, expanded = [], []
+    for s in strides:
+        g = size // s
+        xv, yv = np.meshgrid(np.arange(g), np.arange(g))
+        grid = np.stack((xv, yv), 2).reshape(-1, 2)
+        grids.append(grid)
+        expanded.append(np.full((grid.shape[0], 1), s))
+    grids = np.concatenate(grids, 0)
+    strides_arr = np.concatenate(expanded, 0)
+    xy = (pred[:, 0:2] + grids) * strides_arr
+    wh = np.exp(pred[:, 2:4]) * strides_arr
+    obj = pred[:, 4:5]
+    cls = pred[:, 5:]
+    cls_id = cls.argmax(1)
+    cls_conf = cls[np.arange(cls.shape[0]), cls_id]
+    scores = (obj[:, 0] * cls_conf)
+    keep = scores >= conf
+    if not keep.any():
+        return np.empty((0, 4)), np.empty((0,)), np.empty((0,), dtype=int)
+    xy, wh = xy[keep], wh[keep]
+    boxes = np.concatenate([xy - wh / 2.0, xy + wh / 2.0], 1)  # xyxy
+    return boxes, scores[keep], cls_id[keep]
+
+
+def _nms(boxes, scores, iou_thr: float):
+    import numpy as np
+    if boxes.shape[0] == 0:
+        return []
+    x1, y1, x2, y2 = boxes[:, 0], boxes[:, 1], boxes[:, 2], boxes[:, 3]
+    areas = (x2 - x1).clip(0) * (y2 - y1).clip(0)
+    order = scores.argsort()[::-1]
+    keep = []
+    while order.size > 0:
+        i = order[0]
+        keep.append(int(i))
+        xx1 = np.maximum(x1[i], x1[order[1:]])
+        yy1 = np.maximum(y1[i], y1[order[1:]])
+        xx2 = np.minimum(x2[i], x2[order[1:]])
+        yy2 = np.minimum(y2[i], y2[order[1:]])
+        w = np.maximum(0.0, xx2 - xx1)
+        h = np.maximum(0.0, yy2 - yy1)
+        inter = w * h
+        iou = inter / (areas[i] + areas[order[1:]] - inter + 1e-9)
+        order = order[1:][iou <= iou_thr]
+    return keep
+
+
 def _run_onnx(session, image_b64: str, conf: float) -> list[dict]:
-    """REAL inference. Postprocessing is YOLOX-export specific and is validated
-    against the actual weights at deploy time; until then MOCK is the smoke path.
+    """REAL YOLOX inference: letterbox -> ONNX forward -> grid/stride decode ->
+    per-class NMS -> un-letterbox -> bbox normalized to 0..1 (top-left x/y + w/h).
     Returns [] on any failure (fail-open: vision_agent captions anyway)."""
     try:
-        # NOTE: letterbox preprocess + grid-decode + NMS + class-map are tuned to
-        # the specific YOLOX ONNX export; wired here once weights are placed.
-        # Returning [] keeps the gate fail-open rather than emitting garbage boxes.
-        return []
+        import numpy as np
+        from PIL import Image
+        raw = base64.b64decode(image_b64, validate=False)
+        with Image.open(io.BytesIO(raw)) as im:
+            img_rgb = np.asarray(im.convert("RGB"))
+        orig_h, orig_w = img_rgb.shape[:2]
+
+        chw, ratio = _letterbox(img_rgb, INPUT_SIZE)
+        inp_name = session.get_inputs()[0].name
+        output = session.run(None, {inp_name: chw})[0]
+
+        boxes, scores, cls_ids = _decode_yolox(output, INPUT_SIZE, conf)
+        if boxes.shape[0] == 0:
+            return []
+
+        # Per-class NMS.
+        dets: list[dict] = []
+        for c in np.unique(cls_ids):
+            m = cls_ids == c
+            kept = _nms(boxes[m], scores[m], NMS_IOU)
+            cb, cs = boxes[m][kept], scores[m][kept]
+            label = COCO_CLASSES[int(c)] if int(c) < len(COCO_CLASSES) else str(int(c))
+            for b, sc in zip(cb, cs):
+                # Un-letterbox: model px / ratio -> orig px, clip, then normalize.
+                x1 = float(np.clip(b[0] / ratio, 0, orig_w))
+                y1 = float(np.clip(b[1] / ratio, 0, orig_h))
+                x2 = float(np.clip(b[2] / ratio, 0, orig_w))
+                y2 = float(np.clip(b[3] / ratio, 0, orig_h))
+                dets.append({
+                    "class": label,
+                    "confidence": round(float(sc), 4),
+                    "bbox": {
+                        "x": round(x1 / orig_w, 5),
+                        "y": round(y1 / orig_h, 5),
+                        "w": round((x2 - x1) / orig_w, 5),
+                        "h": round((y2 - y1) / orig_h, 5),
+                    },
+                })
+        dets.sort(key=lambda d: d["confidence"], reverse=True)
+        return dets
     except Exception:
         return []
 
