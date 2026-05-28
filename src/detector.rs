@@ -16,7 +16,8 @@ use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 
 /// Default detector service URL. Overridden by the `DETECTOR_URL` env var.
-const DEFAULT_DETECTOR_URL: &str = "http://127.0.0.1:8094/detect";
+/// Port 18094 (NOT 8094 — that's `nuclear-eye-perceive`; see deploy note).
+const DEFAULT_DETECTOR_URL: &str = "http://127.0.0.1:18094/detect";
 
 /// Default confidence threshold below which detections do not gate the VLM.
 pub const DEFAULT_CONF_THRESHOLD: f32 = 0.35;
@@ -694,7 +695,7 @@ mod tests {
         // Don't mutate process env in tests; just assert the default is returned
         // when DETECTOR_URL is unset is environment-dependent, so only check the
         // constant wiring.
-        assert_eq!(DEFAULT_DETECTOR_URL, "http://127.0.0.1:8094/detect");
+        assert_eq!(DEFAULT_DETECTOR_URL, "http://127.0.0.1:18094/detect");
     }
 
     #[test]
