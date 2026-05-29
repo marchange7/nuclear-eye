@@ -11,6 +11,7 @@ WorkingDirectory=/data/git/nuclear-eye
 # Set DETECTOR_MODEL_PATH (real ONNX) or DETECTOR_MOCK=1 (dev) here:
 EnvironmentFile=-/etc/nuclear/sentinelle-detector.env
 ExecStart=/data/venvs/nuclear-eye/bin/python -m uvicorn detector_service:app --host 127.0.0.1 --port 18094
+MemoryMax=2G
 Restart=on-failure
 RestartSec=5s
 

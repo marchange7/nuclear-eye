@@ -17,6 +17,7 @@ Environment=WRAPPER_REQUIRED=1
 # Override the AurelieBridgeConfig bind to avoid conflict with actuator (8086)
 Environment=SAFETY_AURELIE_BIND=127.0.0.1:8082
 ExecStart=/data/git/nuclear-eye/target/release/safety_aurelie_agent
+MemoryMax=2G
 Restart=on-failure
 RestartSec=5s
 StartLimitIntervalSec=60

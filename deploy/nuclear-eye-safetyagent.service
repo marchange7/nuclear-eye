@@ -15,6 +15,7 @@ Environment=HOUSE_SECURITY_CONFIG=/data/git/nuclear-eye/config/security.toml
 Environment=NUCLEAR_WRAPPER_URL=http://127.0.0.1:9091
 Environment=WRAPPER_REQUIRED=1
 ExecStart=/data/git/nuclear-eye/target/release/safetyagent
+MemoryMax=2G
 Restart=on-failure
 RestartSec=5s
 StartLimitIntervalSec=60

@@ -16,6 +16,7 @@ Environment=WRAPPER_REQUIRED=1
 Environment=IPHONE_SENSOR_BIND=127.0.0.1:8089
 Environment=HOUSE_SECURITY_CONFIG=/data/git/nuclear-eye/config/security.toml
 ExecStart=/data/git/nuclear-eye/target/release/iphone_sensor_agent
+MemoryMax=2G
 Restart=on-failure
 RestartSec=5s
 StartLimitIntervalSec=60

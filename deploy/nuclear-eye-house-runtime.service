@@ -19,6 +19,7 @@ Environment=WRAPPER_REQUIRED=1
 # FORTRESS_BASE_URL=http://127.0.0.1:7710
 # IDENTITY_BASE_URL=http://127.0.0.1:7720
 ExecStart=/data/git/nuclear-eye/target/release/house-runtime
+MemoryMax=2G
 # Run health-check on demand: systemctl start nuclear-eye-house-runtime
 StandardOutput=journal
 StandardError=journal

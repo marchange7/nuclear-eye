@@ -29,6 +29,7 @@ Environment=VISION_ALLOW_SYNTHETIC=true
 # Loaded LAST so operator opt-in (real + throttle) overrides the synthetic default above.
 EnvironmentFile=-/home/crew/.config/nuclear-eye/env
 ExecStart=/data/git/nuclear-eye/target/release/vision_agent
+MemoryMax=2G
 Restart=on-failure
 RestartSec=5s
 StartLimitIntervalSec=60

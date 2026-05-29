@@ -6,6 +6,7 @@ After=network.target fastvlm.service
 User=crew
 WorkingDirectory=/data/git/nuclear-eye
 ExecStart=/home/crew/.venv/nuclear/bin/uvicorn main:app --host 0.0.0.0 --port 8092
+MemoryMax=2G
 Restart=on-failure
 RestartSec=10s
 Environment=CAMERA_CONFIG=/data/git/nuclear-eye/cameras.toml

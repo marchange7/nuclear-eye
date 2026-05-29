@@ -17,6 +17,7 @@ Environment=WRAPPER_REQUIRED=1
 Environment=DECISION_AGENT_BIND=127.0.0.1:8085
 Environment=CONSUL_URL=http://127.0.0.1:7710
 ExecStart=/data/git/nuclear-eye/target/release/decision_agent
+MemoryMax=2G
 Restart=on-failure
 RestartSec=5s
 StartLimitIntervalSec=60

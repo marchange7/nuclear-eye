@@ -11,6 +11,7 @@ WorkingDirectory=/data/git/nuclear-eye
 # Set VOICEPRINT_MODEL_PATH (real ECAPA ONNX) or VOICEPRINT_MOCK=1 (dev) here:
 EnvironmentFile=-/etc/nuclear/sentinelle-voiceprint.env
 ExecStart=/data/venvs/nuclear-eye/bin/python -m uvicorn voiceprint_service:app --host 127.0.0.1 --port 5557
+MemoryMax=2G
 Restart=on-failure
 RestartSec=5s
 

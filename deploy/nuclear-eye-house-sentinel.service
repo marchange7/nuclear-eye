@@ -23,6 +23,7 @@ Environment=WRAPPER_REQUIRED=1
 ExecStart=/data/git/nuclear-eye/target/release/house-sentinel \
     --action health-check \
     --kind observe_only
+MemoryMax=2G
 StandardOutput=journal
 StandardError=journal
 

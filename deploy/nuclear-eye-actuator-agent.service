@@ -17,6 +17,7 @@ Environment=WRAPPER_REQUIRED=1
 Environment=ACTUATOR_BIND=127.0.0.1:8086
 Environment=ACTUATOR_MQTT_PORT=1883
 ExecStart=/data/git/nuclear-eye/target/release/actuator_agent
+MemoryMax=2G
 Restart=on-failure
 RestartSec=5s
 StartLimitIntervalSec=60

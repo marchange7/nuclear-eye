@@ -11,6 +11,7 @@ WorkingDirectory=/data/git/nuclear-eye
 # Set YAMNET_MODEL_PATH (real YAMNet ONNX) or YAMNET_MOCK=1 (dev) here:
 EnvironmentFile=-/etc/nuclear/sentinelle-yamnet.env
 ExecStart=/data/venvs/nuclear-eye/bin/python -m uvicorn yamnet_service:app --host 127.0.0.1 --port 5558
+MemoryMax=2G
 Restart=on-failure
 RestartSec=5s
 
