@@ -65,6 +65,16 @@ path = "src/bin/house_sentinel.rs"
 name = "actuator_agent"
 path = "src/bin/actuator_agent.rs"
 
+# SEN-12 optional PG-persistence backup path (superseded by the gateway ingest).
+# The file is only half-feature-gated, so without this explicit entry cargo
+# auto-discovers src/bin/alarm_pg.rs and fails the default `cargo build`/`check`
+# on the optional `sqlx` dep. `required-features` makes default builds skip it;
+# build it with: cargo build --features alarm_pg --bin alarm_pg
+[[bin]]
+name = "alarm_pg"
+path = "src/bin/alarm_pg.rs"
+required-features = ["alarm_pg"]
+
 [dependencies]
 nuclear-sdk = { version = "0.5", path = "../nuclear-sdk/crates/nuclear-sdk", default-features = false, features = ["fortress", "penny", "consul", "chain"] }
 anyhow = "1.0"
