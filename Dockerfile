@@ -12,7 +12,7 @@
 
 # ── Stage 1: Builder ──────────────────────────────────────────────────────────
 
-FROM rust:1.78-bullseye AS builder
+FROM rust:1.88-bullseye AS builder
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
         pkg-config \
@@ -27,7 +27,12 @@ WORKDIR /build
 # These change less often than nuclear-eye source.
 COPY nuclear-sdk/               nuclear-sdk/
 COPY nuclear-consul/            nuclear-consul/
-COPY nuclear-wrapper/core/      nuclear-wrapper/core/
+# nuclear-sdk path-depends on nuclear-config/crates/nuclear-config.
+COPY nuclear-config/            nuclear-config/
+# nuclear-wrapper/core uses workspace inheritance (.workspace = true), so the
+# whole nuclear-wrapper/ (root Cargo.toml + core + crates) must be present or
+# its manifest can't be parsed.
+COPY nuclear-wrapper/           nuclear-wrapper/
 COPY nuclear-platform/fortress/crates/nuclear-voice-client/ \
      nuclear-platform/fortress/crates/nuclear-voice-client/
 
@@ -35,6 +40,7 @@ COPY nuclear-platform/fortress/crates/nuclear-voice-client/ \
 COPY nuclear-eye/               nuclear-eye/
 
 # Build all release binaries.
+ENV CARGO_BUILD_JOBS=2
 WORKDIR /build/nuclear-eye
 RUN cargo build --release --bins
 
