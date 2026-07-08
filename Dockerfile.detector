@@ -1,0 +1,43 @@
+# Dockerfile.detector — Sentinelle always-on object detector sidecar (:18094).
+#
+# Serves the `POST /detect` contract that nuclear-eye's `detector::HttpDetector`
+# (src/detector.rs) calls to gate the expensive FastVLM captioner. On b450 this
+# runs as a host systemd unit (deploy/sentinelle-detector.service); this image
+# is the containerised form used by the Jetson home appliance profile.
+#
+# Modes (set via compose env):
+#   * MOCK  — DETECTOR_MOCK=1 (default here): deterministic centred "person"
+#             detection so the vision_agent -> detector -> FastVLM gate works
+#             end-to-end before real weights are provisioned.
+#   * REAL  — DETECTOR_MODEL_PATH=/data/models/yolox/yolox_s.onnx (Apache-2.0
+#             YOLOX export). onnxruntime uses CUDA if available, else CPU.
+#
+# License: pair with an Apache-2.0 detector (YOLOX / NanoDet / RT-DETR).
+# Do NOT ship Ultralytics YOLOv8/v11 weights (AGPL) in a commercial build.
+FROM python:3.11-slim-bookworm
+
+ENV PYTHONUNBUFFERED=1 \
+    PIP_NO_CACHE_DIR=1 \
+    DETECTOR_MOCK=1
+
+WORKDIR /app
+
+# fastapi/uvicorn/pillow/numpy/onnxruntime all ship prebuilt aarch64 wheels,
+# so this builds natively on the Jetson (arm64) without a compiler toolchain.
+RUN pip install --no-cache-dir \
+        "fastapi>=0.110" \
+        "uvicorn[standard]>=0.29" \
+        "pillow>=10.0" \
+        "numpy>=1.24" \
+        "onnxruntime>=1.17"
+
+# Build context is the workspace root (parent of nuclear-eye/), matching the
+# vision-agent build in the Jetson compose, so the path is nuclear-eye-relative.
+COPY nuclear-eye/detector_service.py /app/detector_service.py
+
+EXPOSE 18094
+
+# 65534 = nobody. The detector is stateless (model is read-only bind-mounted).
+USER 65534
+
+CMD ["uvicorn", "detector_service:app", "--host", "0.0.0.0", "--port", "18094"]
