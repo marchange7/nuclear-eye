@@ -45,8 +45,10 @@ WORKDIR /build/nuclear-eye
 RUN cargo build --release --bins
 
 # ── Stage 2: Runtime ──────────────────────────────────────────────────────────
-
-FROM debian:bullseye-slim
+# Runtime: bookworm (ffmpeg 5.x). camera_server uses the RTSP demuxer `-timeout`
+# option (socket I/O timeout, client mode); on bullseye's ffmpeg 4.x `-timeout`
+# means LISTEN mode ("Unable to open RTSP for listening") — ffmpeg 5.x is required.
+FROM debian:bookworm-slim
 
 # Runtime library dependencies.
 # - ca-certificates: for TLS (reqwest rustls uses system certs for chain validation)
