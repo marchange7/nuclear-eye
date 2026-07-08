@@ -78,10 +78,11 @@ RUN mkdir -p /etc/nuclear /var/log/nuclear-eye
 # Note: /etc/nuclear and /var/log/nuclear-eye are usually bind-mounted at
 # runtime; pre-create them here so the empty-mount case also works.
 # The agents also write $HOME/.nuclear-eye/memory.db and /data, so give nonroot
-# a real, writable home + data dir (uid 10001).
+# a real, writable home + data dir (uid 10001). /app/face_db is the face_db bin's
+# named-volume mount — own it here so a fresh volume inherits 10001 ownership.
 RUN useradd --uid 10001 --system --create-home --home-dir /home/nonroot nonroot \
-    && mkdir -p /home/nonroot/.nuclear-eye /data \
-    && chown -R nonroot:nonroot /etc/nuclear /var/log/nuclear-eye /home/nonroot /data
+    && mkdir -p /home/nonroot/.nuclear-eye /data /app/face_db \
+    && chown -R nonroot:nonroot /etc/nuclear /var/log/nuclear-eye /home/nonroot /data /app/face_db
 ENV HOME=/home/nonroot
 USER nonroot
 
