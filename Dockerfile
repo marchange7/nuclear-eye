@@ -77,8 +77,12 @@ RUN mkdir -p /etc/nuclear /var/log/nuclear-eye
 # T-P1-21 — drop privileges. All nuclear-eye binaries run as nonroot.
 # Note: /etc/nuclear and /var/log/nuclear-eye are usually bind-mounted at
 # runtime; pre-create them here so the empty-mount case also works.
-RUN useradd --uid 10001 --system nonroot \
-    && chown -R nonroot:nonroot /etc/nuclear /var/log/nuclear-eye
+# The agents also write $HOME/.nuclear-eye/memory.db and /data, so give nonroot
+# a real, writable home + data dir (uid 10001).
+RUN useradd --uid 10001 --system --create-home --home-dir /home/nonroot nonroot \
+    && mkdir -p /home/nonroot/.nuclear-eye /data \
+    && chown -R nonroot:nonroot /etc/nuclear /var/log/nuclear-eye /home/nonroot /data
+ENV HOME=/home/nonroot
 USER nonroot
 
 # No default ENTRYPOINT — docker-compose sets the binary via `command:`.
