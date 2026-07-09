@@ -1,5 +1,11 @@
 [app]
-bind_alarm_grader = "127.0.0.1:8780"
+# Containerized appliance: the alarm grader must bind 0.0.0.0 so the
+# sentinelle-gateway (a separate container) can reach its /health for the
+# fail-closed judgment probe. 127.0.0.1 makes the grader loopback-only →
+# gateway judgment.ready=false → /health reports "degraded". Binding 0.0.0.0
+# is safe here: the port is not published to the host, only reachable on the
+# internal compose network.
+bind_alarm_grader = "0.0.0.0:8780"
 bind_safetyagent = "127.0.0.1:8081"
 bind_face_db = "127.0.0.1:8087"
 alarm_grader_url = "http://127.0.0.1:8780"
